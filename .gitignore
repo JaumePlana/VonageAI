@@ -1,0 +1,15 @@
+# Secrets and per-machine account config
+.env
+accounts.toml
+
+# Exported plans may contain customer data
+exports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/

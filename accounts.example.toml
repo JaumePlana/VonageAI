@@ -1,0 +1,15 @@
+# Copy to accounts.toml and add one section per customer/environment.
+# Secrets never go here: each account names the environment variables
+# (set in .env) that hold its client credentials.
+#
+# region: emea | nam | apac
+
+[accounts.acme-test]
+region = "emea"
+client_id_env = "ACME_TEST_CLIENT_ID"
+client_secret_env = "ACME_TEST_CLIENT_SECRET"
+
+[accounts.acme-prod]
+region = "emea"
+client_id_env = "ACME_PROD_CLIENT_ID"
+client_secret_env = "ACME_PROD_CLIENT_SECRET"
