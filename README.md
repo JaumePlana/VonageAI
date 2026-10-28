@@ -32,8 +32,6 @@ vccflow export-plan   -a acme-test <plan-id>     # -> exports/acme-test/<plan-id
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 ```
 
-`list-mappings` uses a documented path. The plans path (`interaction-plans`) is not yet confirmed; if it returns 404, adjust `PLANS_PATH` in `src/vccflow/ipm.py`.
-
 ## Tests
 
 ```powershell

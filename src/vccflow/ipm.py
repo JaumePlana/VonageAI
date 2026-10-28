@@ -11,9 +11,8 @@ from vccflow.auth import TokenProvider
 READ_SCOPE = "interaction-plans:read"
 ACCEPT_V1 = "application/vnd.newvoicemedia.v1+json"
 
-# "mappings" is confirmed by the docs. The plans resource path is a best guess
-# until we see a real response; fix it here if the API returns 404.
-PLANS_PATH = "interaction-plans"
+# Both paths confirmed against a live account (paths are case-insensitive).
+PLANS_PATH = "interactionplans"
 MAPPINGS_PATH = "mappings"
 
 
