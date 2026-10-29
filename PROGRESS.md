@@ -5,7 +5,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 ## Status (2026-10-28)
 
 ### Done
-- Python project `vccflow` set up (`.venv`, Python 3.15). 34 unit tests pass.
+- Python project `vccflow` set up (`.venv`, Python 3.15). 41 unit tests pass.
 - Per-account config: `accounts.toml` holds region and variable names; `.env` holds secrets. Configured: `Viessmann-test`, `Viessmann-prod` (emea).
 - Login (client credentials, `interaction-plans:read`) works against Viessmann Test.
 - Read-only commands work: `accounts`, `list-plans` (82 plans in Test), `list-mappings`, `export-plan`, `get`.
@@ -54,4 +54,8 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
   - Supported: Web Service; Salesforce get by CLID or data source, one or several records, raw SOQL; Salesforce update. Not recorded yet (refused): match by IVR Slot, Salesforce create, other providers (MS Dynamics, Zendesk, Google, VGIP...).
   - **Live round-trip passed** in JPlana / "zz Claude POC": every variant saved and read back, initial applet set; scratch applets deleted, plan back to "no initial applet".
   - The plan page has a built-in **"Copy To"** (`docopy.asp?source=<planId>`), not explored yet; probably same-account only.
-- [ ] Step 2b, import into another plan: create all applets first, then save each (connections by name), upload media, set the initial applet. Start Test → Test in JPlana.
+- [x] Step 2b, import (2026-10-29): `vccflow import-plan -a <account> <export folder> <target plan> [--dry-run]` (`importer.py`). **Copied DISH Web Services into zz Claude POC (JPlana): 11 applets, the WAV and the initial applet; the read-back matches, and the connection GUIDs point to the new applets.**
+  - Order: checks (name conflicts, dangling connections, unsupported Data Connectors, media ≤ 10 MB) → create all → save each (React applets: target defaults + exported settings + `NextApplet*` names with the target's GUIDs; Data Connectors: form post) → upload media (`Applet/AppletMediaUpload`, file named after the VCC media name) → initial applet → export the target and compare. A failed write deletes the created applets.
+  - A Data Connector with nothing next must post `NextApplet`, `NextAppletFailure` and `NextAppletInterfaceFailure` as empty values (`dcwithoutnextapplets.har`); leaving them out is refused.
+- [x] `vccflow copy-plan <plan> <target> --from <account> [--to <account>] [--dry-run]` (2026-10-29): resolves the target first, exports to `exports/<from>/plans/<plan>/`, then imports. Refuses the same plan as source and target.
+- [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.

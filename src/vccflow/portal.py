@@ -20,6 +20,7 @@ import requests
 from vccflow.config import Account
 
 SESSIONS_DIR = Path(".sessions")
+MAX_MEDIA_BYTES = 10 * 1024 * 1024  # the Announcer editor's upload limit
 INITIAL_STATE = re.compile(r"var\s+initialState\s*=\s*")
 # Data Connector (DataRetriever) pages are an older MVC form, not the React editor.
 DC_MODEL = re.compile(r"\.load\w*Model\(JSON\.parse\(htmlDecode\('(.*?)'\)\)\)", re.S)
@@ -131,7 +132,11 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
                  ("fieldToPopulateSelectBox", ""), ("SerialisedResponseItems", _compact(items))]
     else:
         raise PortalError(f"Data Connector {provider}/{action} has not been recorded yet; it cannot be saved")
-    form += [(k, nxt[k]) for k in DC_NEXT_KEYS if nxt.get(k)]
+    # The page always sends the three outcome fields, empty when nothing follows;
+    # leaving them out is refused ("Please select a valid next applet").
+    form += [(k, nxt.get(k) or "") for k in DC_NEXT_KEYS if k != "NextAppletMultipleMatch"]
+    if nxt.get("NextAppletMultipleMatch"):
+        form.append(("NextAppletMultipleMatch", nxt["NextAppletMultipleMatch"]))
     return form
 
 
@@ -246,6 +251,22 @@ class PortalClient:
             "Applet/Save",
             {"interactionPlanId": plan_id, "appletName": name, "appletProperties": encode_properties(properties)},
         )
+
+    def upload_media(self, plan_id: str, applet_name: str, path: Path, filename: str | None = None) -> int:
+        """Upload an audio file for an applet, as the Announcer editor does. Return its appletMediaId."""
+        self._require_writes()
+        if path.stat().st_size > MAX_MEDIA_BYTES:
+            raise PortalError(f"{path} is larger than 10 MB, which the portal refuses")
+        with path.open("rb") as f:
+            resp = self._request(
+                "POST", "Applet/AppletMediaUpload", headers={"X-Requested-With": "XMLHttpRequest"},
+                data={"interactionPlanId": plan_id, "appletName": applet_name},
+                files={"file": (filename or path.name, f, "audio/wav")},
+            )
+        body = resp.json()
+        if body.get("errorMessage") or not body.get("appletMediaId"):
+            raise PortalError(f"Uploading {path.name} for '{applet_name}' failed: {body.get('errorMessage') or body}")
+        return body["appletMediaId"]
 
     def save_data_connector(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
         """Save a Data Connector's settings, as clicking "Update" on its page does.

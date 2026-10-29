@@ -28,8 +28,15 @@ def test_web_service_form():
     assert form == [
         ("DataProvider", "WebService"), ("Action", "CallWebService"),
         ("SerialisedTemplatePlaceholders", "[]"), ("ApiInteractionDefinition", "<ApiInteraction/>"),
-        ("NextApplet", "DC Get Client"), ("NextAppletFailure", "LOG Audio Failed"),
+        ("NextApplet", "DC Get Client"), ("NextAppletFailure", "LOG Audio Failed"), ("NextAppletInterfaceFailure", ""),
     ]
+
+
+def test_no_next_applets_sends_empty_outcomes():
+    # dcwithoutnextapplets.har: the page posts the three outcomes empty.
+    form = dict(data_connector_form({"DataProvider": "WebService", "Action": "CallWebService"}, {}))
+    assert form["NextApplet"] == form["NextAppletFailure"] == form["NextAppletInterfaceFailure"] == ""
+    assert "NextAppletMultipleMatch" not in form
 
 
 def test_salesforce_get_by_data_source_multiple_records():
