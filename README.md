@@ -38,7 +38,7 @@ vccflow har           exports/architect.har       # offline: sanitize a browser 
 Applets are not in the public API; these commands use the Architect's own backend through your portal login session, saved under `.sessions/` (git-ignored, contains cookies).
 
 ```powershell
-vccflow login         -a JPlana                    # opens Edge; sign in, the window closes by itself
+vccflow login         -a JPlana                    # opens Chrome (--browser msedge for Edge); sign in, the window closes by itself
 vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
 vccflow applet        -a JPlana "zz Claude POC" "ANN Test"
 vccflow poc-announcer -a JPlana "zz Claude POC"    # create, verify, delete (add --keep to keep it)

@@ -41,4 +41,5 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
 - [x] User: record the HAR (done, in the DISH account).
 - [x] Together: analyse the HAR. Result: **A**.
 - [x] Claude: Playwright login (`vccflow login`, session in `.sessions/`), portal client (`portal.py`), and the `applets`, `applet` and `poc-announcer` commands (2026-10-29). The recorded account is **JPlana** (not DISH; "DISH Web Services" is one of its plans). The POC plan is "zz Claude POC" (`da7310e5-10c5-4080-a8b8-34d7e94323f1`). Writes are enabled only for JPlana.
-- [ ] POC: create an Announcer in a scratch plan in a Test account, read it back, delete it.
+- [x] POC: create an Announcer in a scratch plan, read it back, delete it. **Passed on 2026-10-29** in JPlana / "zz Claude POC". The applet "ANN Claude POC" was kept with `--keep`. Deleting applets works too: ANN Test 1 and 2 were deleted through the client.
+- [ ] Step 2: export a whole plan (all applets and their settings) into the common format, then copy it to another plan or account.

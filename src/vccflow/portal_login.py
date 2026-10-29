@@ -11,7 +11,7 @@ from vccflow.portal import SESSIONS_DIR, session_file
 LOGIN_TIMEOUT_S = 300
 
 
-def login(account: Account, browser_channel: str = "msedge") -> str:
+def login(account: Account, browser_channel: str = "chrome") -> str:
     """Return the path of the saved session file."""
     from playwright.sync_api import sync_playwright
 

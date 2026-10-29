@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_har)
 
     p = with_account(sub.add_parser("login", help="sign in to the portal in a browser and save the session"))
-    p.add_argument("--browser", default="msedge", help="browser channel: msedge (default) or chrome")
+    p.add_argument("--browser", default="chrome", help="browser channel: chrome (default) or msedge")
     p.set_defaults(func=cmd_login)
 
     p = with_account(sub.add_parser("applets", help="list the applets of a plan (portal)"))
