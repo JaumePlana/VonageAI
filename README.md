@@ -28,7 +28,6 @@ Edit `accounts.toml` (one section per customer/environment, with its region) and
 vccflow accounts
 vccflow list-plans    -a acme-test
 vccflow list-mappings -a acme-test
-vccflow export-plan   -a acme-test <plan-id>     # -> exports/acme-test/<plan-id>.json
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 vccflow har           exports/architect.har       # offline: sanitize a browser recording
 ```
@@ -42,7 +41,10 @@ vccflow login         -a JPlana                    # opens Chrome (--browser mse
 vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
 vccflow applet        -a JPlana "zz Claude POC" "ANN Test"
 vccflow poc-announcer -a JPlana "zz Claude POC"    # create, verify, delete (add --keep to keep it)
+vccflow export-plan   -a JPlana "DISH Web Services" # -> exports/JPlana/plans/DISH Web Services/plan.json + media/
 ```
+
+The export drops IDs that belong to one account, keeps connections by applet name, and downloads uploaded audio files. Data Connector definitions are exported as-is and can contain credentials.
 
 Writes only run for accounts with `allow_portal_writes = true` in `accounts.toml`. Commands check that the portal session and the API see the same plan, so a session from the wrong account is refused.
 

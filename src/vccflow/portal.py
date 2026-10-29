@@ -8,6 +8,7 @@ portal's cookie session, captured by `vccflow login` (see portal_login.py).
 from __future__ import annotations
 
 import base64
+import html as html_lib
 import json
 import re
 from pathlib import Path
@@ -20,6 +21,11 @@ from vccflow.config import Account
 
 SESSIONS_DIR = Path(".sessions")
 INITIAL_STATE = re.compile(r"var\s+initialState\s*=\s*")
+# Data Connector (DataRetriever) pages are an older MVC form, not the React editor.
+DC_MODEL = re.compile(r"\.loadModel\(JSON\.parse\(htmlDecode\('(.*?)'\)\)\)", re.S)
+DC_FORM = re.compile(r'<form\b[^>]*id="DataRetrieverForm".*?</form>', re.S)
+TEXTAREA = r'<textarea\b[^>]*\bname="{name}"[^>]*>(.*?)</textarea>'
+INPUT_VALUE = r'<input\b(?=[^>]*\bname="{name}")[^>]*\bvalue="([^"]*)"'
 
 
 class PortalError(Exception):
@@ -53,6 +59,30 @@ def extract_initial_state(html: str) -> dict:
         raise PortalError("Applet page has no initialState; the page format may have changed")
     state, _ = json.JSONDecoder().raw_decode(html, m.end())
     return state
+
+
+def extract_data_connector(html: str) -> dict:
+    """Parse a DataRetriever page into {"model": {...}, "fields": {...}}.
+
+    The page model holds the dropdown choices (provider, action, next applets);
+    the request definition itself is only in the form's textarea.
+    """
+    m = DC_MODEL.search(html)
+    if not m:
+        raise PortalError("Data Connector page has no loadModel(...); the page format may have changed")
+    model = json.loads(html_lib.unescape(m.group(1).replace("\\'", "'")))
+    form = DC_FORM.search(html)
+    form_html = form.group(0) if form else ""
+    fields = {}
+    for name in ("ApiInteractionDefinition",):
+        t = re.search(TEXTAREA.format(name=name), form_html, re.S)
+        if t:
+            fields[name] = html_lib.unescape(t.group(1)).strip()
+    for name in ("SerialisedTemplatePlaceholders",):
+        v = re.search(INPUT_VALUE.format(name=name), form_html)
+        if v and v.group(1):
+            fields[name] = html_lib.unescape(v.group(1))
+    return {"model": model, "fields": fields}
 
 
 def encode_properties(props: dict) -> str:
@@ -111,6 +141,22 @@ class PortalClient:
         if not applet.get("configUrl"):
             raise PortalError(f"Applet '{applet.get('name')}' has no configUrl")
         return extract_initial_state(self._request("GET", applet["configUrl"]).text)
+
+    def get_data_connector(self, applet: dict) -> dict:
+        """Return extract_data_connector() for a Data Connector from list_applets()."""
+        return extract_data_connector(self._request("GET", applet["configUrl"]).text)
+
+    def get_media_info(self, media_id: int) -> dict:
+        """Return {"id", "name", "url"} for an uploaded applet audio file."""
+        return self._json("Applet/GetAppletMediaInfo", {"appletMediaId": media_id})["appletMediaInfo"]
+
+    def download_media(self, url: str) -> bytes:
+        """Download a media file by the site-relative url from get_media_info()."""
+        host = self.account.portal_url.rsplit("/CallCentre", 1)[0]
+        resp = self.session.get(host + url, allow_redirects=False, timeout=120)
+        if resp.status_code != 200:
+            raise PortalError(f"Downloading {url} failed: HTTP {resp.status_code}")
+        return resp.content
 
     def find_applet(self, plan_id: str, name: str) -> dict:
         for a in self.list_applets(plan_id).get("applets", []):

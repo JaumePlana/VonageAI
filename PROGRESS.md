@@ -42,4 +42,10 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
 - [x] Together: analyse the HAR. Result: **A**.
 - [x] Claude: Playwright login (`vccflow login`, session in `.sessions/`), portal client (`portal.py`), and the `applets`, `applet` and `poc-announcer` commands (2026-10-29). The recorded account is **JPlana** (not DISH; "DISH Web Services" is one of its plans). The POC plan is "zz Claude POC" (`da7310e5-10c5-4080-a8b8-34d7e94323f1`). Writes are enabled only for JPlana.
 - [x] POC: create an Announcer in a scratch plan, read it back, delete it. **Passed on 2026-10-29** in JPlana / "zz Claude POC". The applet "ANN Claude POC" was kept with `--keep`. Deleting applets works too: ANN Test 1 and 2 were deleted through the client.
-- [ ] Step 2: export a whole plan (all applets and their settings) into the common format, then copy it to another plan or account.
+- [x] Step 2a, export (2026-10-29): `vccflow export-plan -a <account> <plan>` writes `exports/<account>/plans/<plan>/plan.json` plus `media/`. Tested on DISH Web Services (JPlana): 8 applets and 1 WAV file.
+  - Format `vccflow.plan/1`: per applet `name`, `type`, `settings` (IDs/GUIDs removed), `next` (connections by name), `media` (file path). Also `requires.dataSources`.
+  - Announcer and Set Data Source use the React editor (`initialState`). Data Connector (DataRetriever) is an older MVC form: page model plus an `ApiInteractionDefinition` textarea, with a CSRF token (`__RequestVerificationToken`).
+  - Media: `Applet/GetAppletMediaInfo {appletMediaId}` returns name + url, and the url downloads the WAV. Upload goes through `Applet/AppletMediaUpload` (multipart: interactionPlanId, appletName, file; max 10 MB), which returns `appletMediaId`.
+  - Data Connector definitions can contain credentials (they do in DISH). Exports are git-ignored; keep them private.
+- [ ] Step 2b, import into another plan: Announcer, Set Data Source and media through the known endpoints. **Data Connector save needs a HAR** of clicking "Update" on a Data Connector.
+- [ ] Open question: which applet is the plan's entry point, and how is it set?

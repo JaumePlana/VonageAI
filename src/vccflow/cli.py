@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vccflow import har, poc
+from vccflow import export, har, poc
 from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
@@ -45,11 +45,18 @@ def cmd_list_mappings(args: argparse.Namespace) -> None:
 
 
 def cmd_export_plan(args: argparse.Namespace) -> None:
-    plan = _client(args).get_plan(args.plan_id)
-    out = Path(args.out or f"exports/{args.account}/{args.plan_id}.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Saved {out}")
+    portal, ipm = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
+    metadata = ipm.get_plan(plan_id) if ipm else None
+    out = Path(args.out or f"exports/{args.account}/plans/{export._safe_filename(plan_name)}")
+    print(f"Exporting '{plan_name}' from '{args.account}' to {out}")
+    doc = export.export_plan(portal, plan_id, plan_name, out, metadata=metadata)
+    n_media = sum(len(a.get("media", [])) for a in doc["applets"])
+    print(f"Saved {out / 'plan.json'}: {len(doc['applets'])} applets, {n_media} media files")
+    if doc["requires"]["dataSources"]:
+        print(f"Data sources used: {', '.join(doc['requires']['dataSources'])}")
+    if any(a.get("type") == "DataRetriever" for a in doc["applets"]):
+        print("NOTE: Data Connector definitions are exported as-is and may contain credentials. Keep exports private.")
 
 
 def cmd_get(args: argparse.Namespace) -> None:
@@ -114,9 +121,9 @@ def build_parser() -> argparse.ArgumentParser:
     with_account(sub.add_parser("list-plans", help="list interaction plans")).set_defaults(func=cmd_list_plans)
     with_account(sub.add_parser("list-mappings", help="list number/route mappings")).set_defaults(func=cmd_list_mappings)
 
-    p = with_account(sub.add_parser("export-plan", help="save one plan as JSON"))
-    p.add_argument("plan_id")
-    p.add_argument("--out", help="output file (default: exports/<account>/<plan_id>.json)")
+    p = with_account(sub.add_parser("export-plan", help="export a plan with all applets and audio files (portal)"))
+    p.add_argument("plan", help="plan ID or name")
+    p.add_argument("--out", help="output folder (default: exports/<account>/plans/<plan name>)")
     p.set_defaults(func=cmd_export_plan)
 
     p = with_account(sub.add_parser("get", help="raw GET on any IPM path, for exploring the API"))
