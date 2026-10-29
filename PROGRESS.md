@@ -2,6 +2,26 @@
 
 Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](README.md).
 
+## Resume here (end of 2026-10-29)
+
+**Where we are:** export, import and `copy-plan` work within one account (JPlana). Last commit `9ef8c66`, pushed. 41 tests pass.
+
+**State in VCC (JPlana):**
+- "zz Claude POC" (`da7310e5-…`) holds a full copy of "DISH Web Services" (11 applets, initial applet ANN Audio). Delete those applets before copying into it again (the import refuses existing names).
+- Portal sessions expire after a while: if a command says so, run `vccflow login -a JPlana`.
+
+**Next steps, in order:**
+1. **Copy between two accounts** (Test → Test, never PROD first): `vccflow copy-plan "<plan>" "<plan>" --from A --to B --dry-run`, then for real. Needs in B: the plan created and empty, `allow_portal_writes = true`, a portal login, API credentials (for plan names). Only JPlana has writes enabled today.
+2. **Pre-checks for the target account** that the import does not do yet: data sources used by the plan (`requires.dataSources` in plan.json), Salesforce/Web Service connections, and any groups/skills/transfer strings once other applet types are supported.
+3. **More applet types:** only Announcer, Set Data Source and Data Connector are supported. Each new type needs a HAR of creating and saving it (Architect types are listed in the create form: ACD, Menu, Router, Collect Input, …).
+4. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
+5. Later: DrawIO/Visio → `plan.json` → `import-plan`.
+
+**Open items for the user:**
+- Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors (printed in an earlier session).
+- `exports/` holds the HAR recordings and plan exports with credentials and cookies: git-ignored, keep private, delete the raw `.har` files when no longer needed.
+- Optional: explore the portal's built-in "Copy To" (`docopy.asp`).
+
 ## Status (2026-10-28)
 
 ### Done
