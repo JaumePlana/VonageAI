@@ -25,7 +25,20 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 3. **Common plan format:** applets, settings and connections, with groups, skills and transfer strings referenced by name. Copy Test → PROD and DrawIO/Visio import both use it.
 4. Then the original order: Announcer POC → copy Test → PROD → DrawIO/Visio import.
 
+### HAR findings (2026-10-29): case A, a JSON backend
+Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** in Viessmann Test, so the recording was made in another account.
+- The Architect is the legacy portal `https://emea.newvoicemedia.com/CallCentre/apps/...`, logged in through OIDC with a **cookie session**. The save and create calls carry no CSRF header.
+- **List a plan's applets:** `POST Applet/GetAppletsForInteractionPlan`, body `{"interactionPlanId"}`. Returns id, guid, name, appletType and configUrl per applet.
+- **Create an applet:** `POST AppletCreate/Create`, form `interactionPlanId, appletType=DataAnnouncer, appletName, Update=Add`. Redirects (302) to the editor.
+- **Read an applet's settings:** `GET Applet?phonenum=<planId>&myapp=<name>&application=<type>`. HTML with embedded JSON `appletProperties` and `metadata`.
+- **Save an applet:** `POST Applet/Save`, JSON `{interactionPlanId, appletName, appletProperties: base64(JSON)}`. Returns `AppletProperties, AppletMetadata, DataSourceKeys`.
+- **Delete an applet:** `POST appletdelete/delete?interactionPlanId=<id>`, form `<AppletName>=true`.
+- **Connections between applets:** `NextAppletSuccess` / `NextAppletFail` (by applet name), plus `*Guid`. The page first saved with the GUIDs empty, then saved again with them filled in. GUIDs are per account, so names are the key to copy by.
+- Announcer property fields: `AnnouncementType` (Text/ExternalFile/...), `Voice`, `Text`, `BargeIn`, `DataSource`, `AnnouncementMedia`, template fields, `EntityId`, `AppletGuid`.
+
 ## Next steps
-- [ ] Claude: write the HAR clean-up script (strip cookies, auth headers and tokens; list the endpoints called while opening and saving a plan).
-- [ ] User: record the HAR in the Viessmann Test account.
-- [ ] Together: analyse the HAR and choose A or B.
+- [x] Claude: write the HAR clean-up script: `vccflow har <file>` (2026-10-29).
+- [x] User: record the HAR (done, in the DISH account).
+- [x] Together: analyse the HAR. Result: **A**.
+- [ ] Claude: Playwright login that saves the portal session, plus a portal client (list applets, read settings, create, save).
+- [ ] POC: create an Announcer in a scratch plan in a Test account, read it back, delete it.

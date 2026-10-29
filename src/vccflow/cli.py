@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from vccflow import har
 from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
@@ -48,6 +49,20 @@ def cmd_get(args: argparse.Namespace) -> None:
     _print_json(_client(args).get(args.path))
 
 
+def cmd_har(args: argparse.Namespace) -> None:
+    har_path = Path(args.file)
+    if not har_path.exists():
+        raise ConfigError(f"{har_path} not found")
+    clean_path, bodies_dir, calls, leftovers, n_bodies = har.process(har_path, keep_static=args.keep_static)
+    print(har.format_summary(calls))
+    print(f"\nSanitized HAR: {clean_path}")
+    print(f"Bodies ({n_bodies} files): {bodies_dir}")
+    if leftovers:
+        print("\nWARNING: possible secrets still present, check before sharing:", file=sys.stderr)
+        for s in leftovers:
+            print(f"  {s}", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vccflow", description=__doc__)
     parser.add_argument("--config", default="accounts.toml", help="accounts file (default: accounts.toml)")
@@ -70,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = with_account(sub.add_parser("get", help="raw GET on any IPM path, for exploring the API"))
     p.add_argument("path", help="path under /ipm, e.g. mappings")
     p.set_defaults(func=cmd_get)
+
+    p = sub.add_parser("har", help="sanitize a browser HAR recording and list its API calls (offline)")
+    p.add_argument("file", help="HAR file, e.g. exports/architect.har")
+    p.add_argument("--keep-static", action="store_true", help="keep scripts, styles, images and fonts")
+    p.set_defaults(func=cmd_har)
 
     return parser
 

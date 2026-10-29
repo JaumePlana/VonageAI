@@ -30,7 +30,10 @@ vccflow list-plans    -a acme-test
 vccflow list-mappings -a acme-test
 vccflow export-plan   -a acme-test <plan-id>     # -> exports/acme-test/<plan-id>.json
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
+vccflow har           exports/architect.har       # offline: sanitize a browser recording
 ```
+
+`har` writes `architect.clean.har` (cookies, auth headers and tokens removed; scripts, styles and images dropped) and an `architect.bodies/` folder with every request/response body, and prints the list of calls, with writes marked `*`. Only share the `.clean.har`, and only after checking it.
 
 ## Tests
 
