@@ -99,6 +99,18 @@ def cmd_applet(args: argparse.Namespace) -> None:
     _print_json(state["appletProperties"])
 
 
+def cmd_initial_applet(args: argparse.Namespace) -> None:
+    portal, ipm = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
+    if args.set:
+        portal.find_applet(plan_id, args.set)  # fail early on a typo
+        portal.set_initial_applet(plan_id, args.set)
+    current = portal.get_initial_applet(plan_id)
+    if args.set and current != args.set:
+        raise PortalError(f"Initial applet is still '{current}' after setting '{args.set}'")
+    print(f"{plan_name}: initial applet {current!r}" if current else f"{plan_name}: no initial applet set")
+
+
 def cmd_poc_announcer(args: argparse.Namespace) -> None:
     portal, ipm = _portal(args)
     plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
@@ -147,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("plan", help="plan ID or name")
     p.add_argument("name", help="applet name")
     p.set_defaults(func=cmd_applet)
+
+    p = with_account(sub.add_parser("initial-applet", help="show or set the applet a plan starts with (portal)"))
+    p.add_argument("plan", help="plan ID or name")
+    p.add_argument("--set", metavar="APPLET", help="set it to this applet (writes)")
+    p.set_defaults(func=cmd_initial_applet)
 
     p = with_account(sub.add_parser("poc-announcer", help="create, verify and delete an Announcer (portal, writes)"))
     p.add_argument("plan", help="plan ID or name")

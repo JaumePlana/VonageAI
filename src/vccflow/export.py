@@ -30,8 +30,10 @@ DC_NOT_CONFIG = {
     "DataProviders", "Actions", "MetabaseEntries", "PossibleNextApplets", "FormattedNextApplets",
     "TemplateGroups", "CustomAccountConfigs", "IvrSlotsAvailable", "MatchObjectNames",
     "UserCanApprove", "PartialView", "IsVgipDataProvider", "MultipleDataProviders",
-    "ResponseItems", "CrmFields", "FilterableCrmFields",
+    "SerialisedResponseItems", "CrmFields", "FilterableCrmFields",
 }
+# Lookup lists inside the Data Connector's Salesforce sub-models.
+DC_SUB_NOT_CONFIG = {"MatchBys", "MetabaseDetails", "DataSourceTypes", "IvrSlotDetails"}
 PLACEHOLDER = re.compile(r"\$\(([^)]+)\)")
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 
@@ -86,6 +88,11 @@ def collect_data_sources(applet: dict) -> set[str]:
             found.add(ds["Key"])
     if settings.get("DataSource"):
         found.add(settings["DataSource"])
+    if (settings.get("CrmRetrievalViewModel") or {}).get("MatchDataSource"):
+        found.add(settings["CrmRetrievalViewModel"]["MatchDataSource"])
+    for p in (settings.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
+        if p.get("DataSourceType") == 0 and p.get("Value"):
+            found.add(p["Value"])
 
     def scan(v: Any) -> None:
         if isinstance(v, str):
@@ -114,7 +121,11 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         dc = portal.get_data_connector(applet)
         model = dc["model"]
         entry["type"] = "DataRetriever"
-        settings = {k: v for k, v in model.items() if k not in DC_NOT_CONFIG and not _is_next_key(k) and not k.endswith("Url")}
+        settings = {}
+        for k, v in model.items():
+            if k in DC_NOT_CONFIG or _is_next_key(k) or k.endswith("Url"):
+                continue
+            settings[k] = {s: x for s, x in v.items() if s not in DC_SUB_NOT_CONFIG} if isinstance(v, dict) else v
         settings.update(dc["fields"])
         entry["settings"] = settings
         entry["next"] = {k: v for k, v in model.items() if _is_next_key(k) and v}
@@ -169,6 +180,9 @@ def export_plan(
             if target not in names:
                 log(f"    WARNING: {a['name']}.{key} points to '{target}', which is not in this plan")
 
+    initial = portal.get_initial_applet(plan_id)
+    if initial is None:
+        log("    WARNING: the plan has no initial applet")
     data_sources = sorted(set().union(*(collect_data_sources(a) for a in applets)) if applets else set())
     doc = {
         "format": FORMAT,
@@ -180,6 +194,7 @@ def export_plan(
         },
         "plan": {
             "name": plan_name,
+            "initialApplet": initial,
             **({"reportingGroupName": metadata.get("reportingGroupName"),
                 "displayInAgentInterface": metadata.get("displayInAgentInterface")} if metadata else {}),
         },

@@ -72,6 +72,9 @@ class FakePortal:
     def get_data_connector(self, applet):
         return extract_data_connector(DC_HTML)
 
+    def get_initial_applet(self, plan_id):
+        return "ANN Audio"
+
     def get_media_info(self, media_id):
         assert media_id == 15200090
         return {"id": media_id, "name": "Ringing", "url": "/CallCentre/recordings/1/x.wav"}
@@ -100,5 +103,6 @@ def test_export_plan_writes_portable_document(tmp_path):
     assert "ApiInteractionDefinition" in dc["settings"]
 
     assert by_name["LOG Audio Failed"]["next"] == {"NextApplet": "ANN TTS"}
+    assert doc["plan"]["initialApplet"] == "ANN Audio"
     assert set(doc["requires"]["dataSources"]) >= {"LOG", "ANN_Welcome", "CustomerReference", "ResponseCode", "accessToken"}
     assert PLAN_ID not in json.dumps(doc["applets"])  # nothing tied to the source plan

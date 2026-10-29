@@ -22,10 +22,16 @@ from vccflow.config import Account
 SESSIONS_DIR = Path(".sessions")
 INITIAL_STATE = re.compile(r"var\s+initialState\s*=\s*")
 # Data Connector (DataRetriever) pages are an older MVC form, not the React editor.
-DC_MODEL = re.compile(r"\.loadModel\(JSON\.parse\(htmlDecode\('(.*?)'\)\)\)", re.S)
+DC_MODEL = re.compile(r"\.load\w*Model\(JSON\.parse\(htmlDecode\('(.*?)'\)\)\)", re.S)
 DC_FORM = re.compile(r'<form\b[^>]*id="DataRetrieverForm".*?</form>', re.S)
 TEXTAREA = r'<textarea\b[^>]*\bname="{name}"[^>]*>(.*?)</textarea>'
 INPUT_VALUE = r'<input\b(?=[^>]*\bname="{name}")[^>]*\bvalue="([^"]*)"'
+VALIDATION_ERRORS = re.compile(r'class="(?:validation-summary-errors|field-validation-error)"[^>]*>(.*?)</(?:div|span)>', re.S)
+DC_NEXT_KEYS = ("NextApplet", "NextAppletFailure", "NextAppletInterfaceFailure", "NextAppletMultipleMatch")
+# The plan page (applications.asp) lists every plan; the second cell of the plan's row
+# links the initial applet, or says "WARNING initial applet not selected".
+INITIAL_APPLET = r'<tr id="{plan_id}">\s*<td\b[^>]*>.*?</td>\s*<td\b[^>]*>(.*?)</td>'
+LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
 
 
 class PortalError(Exception):
@@ -83,6 +89,58 @@ def extract_data_connector(html: str) -> dict:
         if v and v.group(1):
             fields[name] = html_lib.unescape(v.group(1))
     return {"model": model, "fields": fields}
+
+
+def _compact(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
+    """Build the DataRetriever form post for a Data Connector, as the page sends it on "Update".
+
+    settings are the exported page-model values (see export.py), nxt the NextApplet* names.
+    Covers the cases recorded so far: Web Service calls, and Salesforce get (match by CLID
+    or data source, raw SOQL, one or several records) and update.
+    """
+    provider, action = settings.get("DataProvider"), settings.get("Action")
+    form = [("DataProvider", provider), ("Action", action)]
+    if provider == "WebService":
+        form += [
+            ("SerialisedTemplatePlaceholders", settings.get("SerialisedTemplatePlaceholders") or "[]"),
+            ("ApiInteractionDefinition", settings.get("ApiInteractionDefinition") or ""),
+        ]
+    elif provider == "Salesforce" and action == "GetSalesforceData":
+        crm = settings.get("CrmRetrievalViewModel") or {}
+        if crm.get("UseRawSoql"):
+            form += [("UseRawSoql", "true"), ("CrmRetrievalViewModel.UseRawSoql", "false"), ("Soql", crm.get("Soql") or "")]
+        else:
+            match_by = crm.get("MatchBy") or "CLID"
+            form += [("CrmRetrievalViewModel.UseRawSoql", "false"),
+                     ("MatchObjectName", settings.get("MatchObjectName") or ""), ("MatchBy", match_by)]
+            if match_by == "Data Source":
+                form += [("MatchDataSource", crm.get("MatchDataSource") or ""), ("FieldToMatch", crm.get("FieldToMatch") or "")]
+            elif match_by != "CLID":
+                raise PortalError(f"Salesforce match by '{match_by}' has not been recorded yet; it cannot be saved")
+            if crm.get("MaxRecords"):
+                form += [("RetrieveMultiple", "on"), ("MaxRecords", str(crm["MaxRecords"]))]
+            form += [("fieldToRetrieveSelectBox", ""), ("SerialisedResponseItems", _compact(settings.get("ResponseItems") or []))]
+    elif provider == "Salesforce" and action == "UpdateSalesforceObject":
+        params = (settings.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []
+        items = [{"crmField": p["CrmField"], "dataSourceType": p["DataSourceType"], "value": p["Value"]} for p in params]
+        form += [("MatchObjectName", settings.get("MatchObjectName") or ""),
+                 ("fieldToPopulateSelectBox", ""), ("SerialisedResponseItems", _compact(items))]
+    else:
+        raise PortalError(f"Data Connector {provider}/{action} has not been recorded yet; it cannot be saved")
+    form += [(k, nxt[k]) for k in DC_NEXT_KEYS if nxt.get(k)]
+    return form
+
+
+def extract_initial_applet(html: str, plan_id: str) -> str | None:
+    m = re.search(INITIAL_APPLET.format(plan_id=re.escape(plan_id)), html, re.S)
+    if not m:
+        raise PortalError(f"Plan {plan_id} not found on the plan page; the page format may have changed")
+    link = LINK_TEXT.search(m.group(1))
+    return html_lib.unescape(link.group(1)).strip() if link else None
 
 
 def encode_properties(props: dict) -> str:
@@ -158,6 +216,11 @@ class PortalClient:
             raise PortalError(f"Downloading {url} failed: HTTP {resp.status_code}")
         return resp.content
 
+    def get_initial_applet(self, plan_id: str) -> str | None:
+        """Name of the applet the plan starts with, or None if it is not set."""
+        html = self._request("GET", f"applications.asp?phonenum={quote(plan_id)}").text
+        return extract_initial_applet(html, plan_id)
+
     def find_applet(self, plan_id: str, name: str) -> dict:
         for a in self.list_applets(plan_id).get("applets", []):
             if a["name"] == name:
@@ -173,7 +236,8 @@ class PortalClient:
             "POST", "AppletCreate/Create", expect_redirect=True,
             data={"interactionPlanId": plan_id, "appletType": applet_type, "appletName": name, "Update": "Add"},
         )
-        if "Applet" not in resp.headers.get("Location", ""):
+        # Redirects to the new applet's editor: Applet?... or, for a Data Connector, DataRetriever?...
+        if "myapp=" not in resp.headers.get("Location", "").lower():
             raise PortalError(f"Creating '{name}' did not open the applet editor: {resp.headers.get('Location')}")
 
     def save_applet(self, plan_id: str, name: str, properties: dict) -> dict:
@@ -182,6 +246,48 @@ class PortalClient:
             "Applet/Save",
             {"interactionPlanId": plan_id, "appletName": name, "appletProperties": encode_properties(properties)},
         )
+
+    def save_data_connector(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
+        """Save a Data Connector's settings, as clicking "Update" on its page does.
+
+        Returns the saved page parsed by extract_data_connector(), for reading back.
+        """
+        self._require_writes()
+        form = data_connector_form(settings, nxt)  # fails before any request if unsupported
+        page_url = f"DataRetriever?phonenum={quote(plan_id)}&myapp={quote(name)}&application=DataRetriever"
+        page = self._request("GET", page_url).text
+        token = re.search(INPUT_VALUE.format(name="__RequestVerificationToken"), page)
+        if not token:
+            raise PortalError(f"Data Connector page for '{name}' has no form token")
+        # The page loads the provider (and object) panels before saving; do the same.
+        # Those two are AJAX-only actions: without X-Requested-With they answer 405.
+        referer = {"Referer": f"{self.base}/{page_url}"}
+        ajax = {**referer, "X-Requested-With": "XMLHttpRequest"}
+        provider = settings["DataProvider"]
+        self._request("POST", "DataRetriever/EditDataProvider", headers=ajax,
+                      data={"phoneNumber": plan_id, "appletInstanceName": name, "dataProviderName": provider})
+        if provider == "Salesforce" and settings.get("MatchObjectName"):
+            self._request("POST", "DataRetriever/EditMatchObject", headers=ajax,
+                          data={"dataProviderName": provider, "matchObject": settings["MatchObjectName"],
+                                "action": settings["Action"]})
+        resp = self._request("POST", f"DataRetriever?phoneNum={quote(plan_id)}&myApp={quote(name)}", headers=referer,
+                             data=[("__RequestVerificationToken", html_lib.unescape(token.group(1))), *form])
+        errors = [re.sub(r"<[^>]+>", " ", e).strip() for e in VALIDATION_ERRORS.findall(resp.text)]
+        if any(errors):
+            raise PortalError(f"Saving Data Connector '{name}' was refused: {'; '.join(e for e in errors if e)}")
+        return extract_data_connector(resp.text)
+
+    def set_initial_applet(self, plan_id: str, name: str) -> None:
+        """Set the applet the plan starts with.
+
+        It cannot be cleared: the portal ignores an empty value. It is cleared only
+        when the applet itself is deleted.
+        """
+        if not name:
+            raise PortalError("The initial applet cannot be cleared, only set to another applet")
+        self._require_writes()
+        self._request("POST", "InteractionArchitect/SetInitialApplet", expect_redirect=True,
+                      data={"interactionPlanId": plan_id, "initialApplet": name, "Update": "Set"})
 
     def delete_applet(self, plan_id: str, name: str) -> None:
         self._require_writes()

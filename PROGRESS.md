@@ -5,7 +5,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 ## Status (2026-10-28)
 
 ### Done
-- Python project `vccflow` set up (`.venv`, Python 3.15). 5 unit tests pass.
+- Python project `vccflow` set up (`.venv`, Python 3.15). 34 unit tests pass.
 - Per-account config: `accounts.toml` holds region and variable names; `.env` holds secrets. Configured: `Viessmann-test`, `Viessmann-prod` (emea).
 - Login (client credentials, `interaction-plans:read`) works against Viessmann Test.
 - Read-only commands work: `accounts`, `list-plans` (82 plans in Test), `list-mappings`, `export-plan`, `get`.
@@ -47,5 +47,11 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
   - Announcer and Set Data Source use the React editor (`initialState`). Data Connector (DataRetriever) is an older MVC form: page model plus an `ApiInteractionDefinition` textarea, with a CSRF token (`__RequestVerificationToken`).
   - Media: `Applet/GetAppletMediaInfo {appletMediaId}` returns name + url, and the url downloads the WAV. Upload goes through `Applet/AppletMediaUpload` (multipart: interactionPlanId, appletName, file; max 10 MB), which returns `appletMediaId`.
   - Data Connector definitions can contain credentials (they do in DISH). Exports are git-ignored; keep them private.
-- [ ] Step 2b, import into another plan: Announcer, Set Data Source and media through the known endpoints. **Data Connector save needs a HAR** of clicking "Update" on a Data Connector.
-- [ ] Open question: which applet is the plan's entry point, and how is it set?
+- [x] Data Connector save and the initial applet (2026-10-29), from the user's `dataconnector.har` and `initialapplet.har`:
+  - **Initial applet:** `POST InteractionArchitect/SetInitialApplet`, form `interactionPlanId, initialApplet=<name>, Update=Set` (301). Read it from `applications.asp?phonenum=<id>`: that page lists *every* plan, and the second cell of the plan's row links the initial applet or says "WARNING initial applet not selected". It **cannot be cleared** (an empty value is ignored); deleting the applet clears it. Export writes it to `plan.initialApplet`; CLI `vccflow initial-applet`.
+  - **Data Connector save:** GET the page (`DataRetriever?phonenum=&myapp=&application=DataRetriever`) for `__RequestVerificationToken`, then `POST DataRetriever/EditDataProvider` (and `EditMatchObject` for Salesforce), both AJAX-only (need `X-Requested-With`, otherwise 405), then the form `POST DataRetriever?phoneNum=&myApp=`. It answers 200 with the page; refusals are in `validation-summary-errors` (e.g. the XML is validated, SOQL needs `LIMIT 1..10`, a Salesforce update needs the object's `Id` field mapped).
+  - Salesforce pages use `loadCrmModel(...)`; the page model holds the full configuration (`CrmRetrievalViewModel`: MatchBy/MatchDataSource/FieldToMatch/MaxRecords/UseRawSoql/Soql; `ResponseItems`; `CrmCreationViewModel.CrmObjectParameters` for updates). `portal.data_connector_form()` rebuilds the post from the exported settings.
+  - Supported: Web Service; Salesforce get by CLID or data source, one or several records, raw SOQL; Salesforce update. Not recorded yet (refused): match by IVR Slot, Salesforce create, other providers (MS Dynamics, Zendesk, Google, VGIP...).
+  - **Live round-trip passed** in JPlana / "zz Claude POC": every variant saved and read back, initial applet set; scratch applets deleted, plan back to "no initial applet".
+  - The plan page has a built-in **"Copy To"** (`docopy.asp?source=<planId>`), not explored yet; probably same-account only.
+- [ ] Step 2b, import into another plan: create all applets first, then save each (connections by name), upload media, set the initial applet. Start Test → Test in JPlana.
