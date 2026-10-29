@@ -18,8 +18,11 @@ class ConfigError(Exception):
 class Account:
     name: str
     region: str
-    client_id: str
-    client_secret: str
+    # API credentials are optional: portal-only accounts work without them.
+    client_id: str | None = None
+    client_secret: str | None = None
+    # Portal writes (create/save/delete applets) must be enabled per account.
+    allow_portal_writes: bool = False
 
     @property
     def token_url(self) -> str:
@@ -28,6 +31,14 @@ class Account:
     @property
     def ipm_base_url(self) -> str:
         return f"https://{self.region}.api.cc.vonage.com/ipm"
+
+    @property
+    def portal_url(self) -> str:
+        return f"https://{self.region}.newvoicemedia.com/CallCentre"
+
+    @property
+    def has_api_credentials(self) -> bool:
+        return bool(self.client_id and self.client_secret)
 
 
 def load_accounts_file(path: Path) -> dict:
@@ -55,10 +66,10 @@ def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Ac
     if region not in REGIONS:
         raise ConfigError(f"Account '{name}': region must be one of {', '.join(REGIONS)}")
 
-    def secret(key: str) -> str:
+    def secret(key: str) -> str | None:
         var = entry.get(key)
         if not var:
-            raise ConfigError(f"Account '{name}': missing '{key}'")
+            return None
         value = env.get(var)
         if not value:
             raise ConfigError(f"Account '{name}': environment variable {var} is not set")
@@ -69,4 +80,5 @@ def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Ac
         region=region,
         client_id=secret("client_id_env"),
         client_secret=secret("client_secret_env"),
+        allow_portal_writes=bool(entry.get("allow_portal_writes", False)),
     )

@@ -33,6 +33,19 @@ vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 vccflow har           exports/architect.har       # offline: sanitize a browser recording
 ```
 
+### Portal (applets)
+
+Applets are not in the public API; these commands use the Architect's own backend through your portal login session, saved under `.sessions/` (git-ignored, contains cookies).
+
+```powershell
+vccflow login         -a JPlana                    # opens Edge; sign in, the window closes by itself
+vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
+vccflow applet        -a JPlana "zz Claude POC" "ANN Test"
+vccflow poc-announcer -a JPlana "zz Claude POC"    # create, verify, delete (add --keep to keep it)
+```
+
+Writes only run for accounts with `allow_portal_writes = true` in `accounts.toml`. Commands check that the portal session and the API see the same plan, so a session from the wrong account is refused.
+
 `har` writes `architect.clean.har` (cookies, auth headers and tokens removed; scripts, styles and images dropped) and an `architect.bodies/` folder with every request/response body, and prints the list of calls, with writes marked `*`. Only share the `.clean.har`, and only after checking it.
 
 ## Tests

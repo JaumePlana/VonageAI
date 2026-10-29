@@ -3,6 +3,9 @@
 # (set in .env) that hold its client credentials.
 #
 # region: emea | nam | apac
+# client_id_env / client_secret_env: optional, needed for the IPM API commands.
+# allow_portal_writes: set to true to let vccflow create/save/delete applets
+#   through the portal session. Leave it off for PROD until a copy is proven.
 
 [accounts.acme-test]
 region = "emea"

@@ -9,15 +9,22 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vccflow import har
+from vccflow import har, poc
 from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
+from vccflow.portal import PortalClient, PortalError
 
 
 def _client(args: argparse.Namespace) -> IpmClient:
     account = load_account(args.account, Path(args.config))
     return IpmClient(TokenProvider(account))
+
+
+def _portal(args: argparse.Namespace) -> tuple[PortalClient, IpmClient | None]:
+    account = load_account(args.account, Path(args.config))
+    ipm = IpmClient(TokenProvider(account)) if account.has_api_credentials else None
+    return PortalClient(account), ipm
 
 
 def _print_json(data) -> None:
@@ -63,6 +70,36 @@ def cmd_har(args: argparse.Namespace) -> None:
             print(f"  {s}", file=sys.stderr)
 
 
+def cmd_login(args: argparse.Namespace) -> None:
+    from vccflow.portal_login import login
+
+    account = load_account(args.account, Path(args.config))
+    path = login(account, browser_channel=args.browser)
+    PortalClient(account).check_session()
+    print(f"Logged in. Session saved to {path}")
+
+
+def cmd_applets(args: argparse.Namespace) -> None:
+    portal, ipm = _portal(args)
+    plan_id, _ = poc.resolve_plan(args.plan, portal, ipm)
+    _print_json(portal.list_applets(plan_id))
+
+
+def cmd_applet(args: argparse.Namespace) -> None:
+    portal, ipm = _portal(args)
+    plan_id, _ = poc.resolve_plan(args.plan, portal, ipm)
+    state = portal.get_applet_state(plan_id, portal.find_applet(plan_id, args.name))
+    _print_json(state["appletProperties"])
+
+
+def cmd_poc_announcer(args: argparse.Namespace) -> None:
+    portal, ipm = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
+    print(f"Plan: {plan_name} ({plan_id}) in account '{args.account}'")
+    poc.run_announcer_poc(portal, plan_id, args.name, args.text, voice=args.voice, keep=args.keep)
+    print("POC passed.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vccflow", description=__doc__)
     parser.add_argument("--config", default="accounts.toml", help="accounts file (default: accounts.toml)")
@@ -91,6 +128,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-static", action="store_true", help="keep scripts, styles, images and fonts")
     p.set_defaults(func=cmd_har)
 
+    p = with_account(sub.add_parser("login", help="sign in to the portal in a browser and save the session"))
+    p.add_argument("--browser", default="msedge", help="browser channel: msedge (default) or chrome")
+    p.set_defaults(func=cmd_login)
+
+    p = with_account(sub.add_parser("applets", help="list the applets of a plan (portal)"))
+    p.add_argument("plan", help="plan ID, or plan name if the account has API credentials")
+    p.set_defaults(func=cmd_applets)
+
+    p = with_account(sub.add_parser("applet", help="show one applet's settings (portal)"))
+    p.add_argument("plan", help="plan ID or name")
+    p.add_argument("name", help="applet name")
+    p.set_defaults(func=cmd_applet)
+
+    p = with_account(sub.add_parser("poc-announcer", help="create, verify and delete an Announcer (portal, writes)"))
+    p.add_argument("plan", help="plan ID or name")
+    p.add_argument("--name", default="ANN Claude POC", help="applet name")
+    p.add_argument("--text", default="This is a test announcement created by vccflow.")
+    p.add_argument("--voice", default="Amy")
+    p.add_argument("--keep", action="store_true", help="keep the applet instead of deleting it")
+    p.set_defaults(func=cmd_poc_announcer)
+
     return parser
 
 
@@ -99,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
-    except (ConfigError, AuthError, IpmError) as e:
+    except (ConfigError, AuthError, IpmError, PortalError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

@@ -1,6 +1,8 @@
 # Secrets and per-machine account config
 .env
 accounts.toml
+# Portal login cookies
+.sessions/
 
 # Exported plans may contain customer data
 exports/

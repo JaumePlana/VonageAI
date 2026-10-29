@@ -33,6 +33,11 @@ class TokenProvider:
         cached = self._cache.get(scope)
         if cached and cached[1] > self.clock():
             return cached[0]
+        if not self.account.has_api_credentials:
+            raise AuthError(
+                f"Account '{self.account.name}' has no API credentials "
+                "(client_id_env/client_secret_env in accounts.toml)"
+            )
 
         resp = self.session.post(
             self.account.token_url,

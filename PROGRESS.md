@@ -40,5 +40,5 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
 - [x] Claude: write the HAR clean-up script: `vccflow har <file>` (2026-10-29).
 - [x] User: record the HAR (done, in the DISH account).
 - [x] Together: analyse the HAR. Result: **A**.
-- [ ] Claude: Playwright login that saves the portal session, plus a portal client (list applets, read settings, create, save).
+- [x] Claude: Playwright login (`vccflow login`, session in `.sessions/`), portal client (`portal.py`), and the `applets`, `applet` and `poc-announcer` commands (2026-10-29). The recorded account is **JPlana** (not DISH; "DISH Web Services" is one of its plans). The POC plan is "zz Claude POC" (`da7310e5-10c5-4080-a8b8-34d7e94323f1`). Writes are enabled only for JPlana.
 - [ ] POC: create an Announcer in a scratch plan in a Test account, read it back, delete it.
