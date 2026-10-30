@@ -17,7 +17,14 @@ MAPPINGS_PATH = "mappings"
 
 
 class IpmError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def feature_disabled(self) -> bool:
+        """The account has no Interaction Plan API (VCC answers 403 "Feature not enabled")."""
+        return self.status == 403
 
 
 class IpmClient:
@@ -37,7 +44,7 @@ class IpmClient:
             timeout=60,
         )
         if resp.status_code != 200:
-            raise IpmError(f"GET {url} failed: HTTP {resp.status_code} {resp.text[:500]}")
+            raise IpmError(f"GET {url} failed: HTTP {resp.status_code} {resp.text[:500]}", resp.status_code)
         return resp.json()
 
     def list_plans(self) -> Any:

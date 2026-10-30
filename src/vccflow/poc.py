@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from vccflow.ipm import IpmClient
+from vccflow.ipm import IpmClient, IpmError
 from vccflow.portal import PortalClient, PortalError
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -16,22 +16,32 @@ ANNOUNCER_TYPE = "DataAnnouncer"
 def resolve_plan(plan: str, portal: PortalClient, ipm: IpmClient | None) -> tuple[str, str]:
     """Return (plan_id, plan_name) for a plan ID or name.
 
-    When API credentials exist, the plan is also looked up through the IPM API,
-    which is bound to the account. Checking that the portal session sees the same
-    plan guards against a session that belongs to a different account.
+    When the account has the Interaction Plan API, the plan is also looked up there;
+    that API is bound to the account, so a portal session from a different account
+    is caught. Without it (no credentials, or 403 "Feature not enabled"), the plan is
+    looked up on the portal's plan page only.
     """
     api_name = None
-    if UUID.match(plan):
-        plan_id = plan
-        if ipm:
-            api_name = ipm.get_plan(plan_id)["interactionPlanName"]
-    else:
-        if not ipm:
-            raise PortalError("Plan names need API credentials for this account; pass the plan ID instead")
-        matches = [p for p in ipm.list_plans() if p["interactionPlanName"] == plan]
+    if ipm:
+        try:
+            if UUID.match(plan):
+                api_name = ipm.get_plan(plan)["interactionPlanName"]
+                plan_id = plan
+            else:  # a name, or an older non-GUID plan ID (e.g. "Partner_JPlana-4")
+                matches = [p for p in ipm.list_plans() if plan in (p["interactionPlanId"], p["interactionPlanName"])]
+                if len(matches) != 1:
+                    raise PortalError(f"Expected one plan with ID or name '{plan}', found {len(matches)}")
+                plan_id, api_name = matches[0]["interactionPlanId"], matches[0]["interactionPlanName"]
+        except IpmError as e:
+            if not e.feature_disabled:
+                raise
+            ipm = None  # no API on this account: fall back to the portal
+    if not ipm:
+        plans = portal.list_plans()
+        matches = [p for p in plans if plan in (p["interactionPlanId"], p["interactionPlanName"])]
         if len(matches) != 1:
-            raise PortalError(f"Expected one plan named '{plan}', found {len(matches)}")
-        plan_id, api_name = matches[0]["interactionPlanId"], plan
+            raise PortalError(f"Expected one plan with ID or name '{plan}' on the portal, found {len(matches)}")
+        plan_id = matches[0]["interactionPlanId"]
 
     portal_name = portal.list_applets(plan_id).get("name")
     if not portal_name:

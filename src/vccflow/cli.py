@@ -37,7 +37,16 @@ def cmd_accounts(args: argparse.Namespace) -> None:
 
 
 def cmd_list_plans(args: argparse.Namespace) -> None:
-    _print_json(_client(args).list_plans())
+    account = load_account(args.account, Path(args.config))
+    if not args.portal and account.has_api_credentials:
+        try:
+            _print_json(IpmClient(TokenProvider(account)).list_plans())
+            return
+        except IpmError as e:
+            if not e.feature_disabled:
+                raise
+            print(f"Interaction Plan API not enabled for '{account.name}'; reading the portal instead.", file=sys.stderr)
+    _print_json(PortalClient(account).list_plans())
 
 
 def cmd_list_mappings(args: argparse.Namespace) -> None:
@@ -48,7 +57,12 @@ def _export(portal: PortalClient, ipm: IpmClient | None, plan: str, out: str | N
     """Export a plan; return (export folder, plan ID)."""
     account = portal.account.name
     plan_id, plan_name = poc.resolve_plan(plan, portal, ipm)
-    metadata = ipm.get_plan(plan_id) if ipm else None
+    try:
+        metadata = ipm.get_plan(plan_id) if ipm else None
+    except IpmError as e:
+        if not e.feature_disabled:
+            raise
+        metadata = None
     folder = Path(out or f"exports/{account}/plans/{export._safe_filename(plan_name)}")
     print(f"Exporting '{plan_name}' from '{account}' to {folder}")
     doc = export.export_plan(portal, plan_id, plan_name, folder, metadata=metadata)
@@ -169,7 +183,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--account", "-a", required=True, help="account name from accounts.toml")
         return p
 
-    with_account(sub.add_parser("list-plans", help="list interaction plans")).set_defaults(func=cmd_list_plans)
+    p = with_account(sub.add_parser("list-plans", help="list interaction plans (API, or the portal if the API is off)"))
+    p.add_argument("--portal", action="store_true", help="read the portal's plan page even if the API is available")
+    p.set_defaults(func=cmd_list_plans)
     with_account(sub.add_parser("list-mappings", help="list number/route mappings")).set_defaults(func=cmd_list_mappings)
 
     p = with_account(sub.add_parser("export-plan", help="export a plan with all applets and audio files (portal)"))

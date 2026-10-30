@@ -26,7 +26,7 @@ Edit `accounts.toml` (one section per customer/environment, with its region) and
 
 ```powershell
 vccflow accounts
-vccflow list-plans    -a acme-test
+vccflow list-plans    -a acme-test               # falls back to the portal if the API is off; --portal to force it
 vccflow list-mappings -a acme-test
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 vccflow har           exports/HAR/architect.har   # offline: sanitize a browser recording (keep HARs in exports/HAR/)

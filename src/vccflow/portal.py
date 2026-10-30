@@ -33,6 +33,8 @@ DC_NEXT_KEYS = ("NextApplet", "NextAppletFailure", "NextAppletInterfaceFailure",
 # links the initial applet, or says "WARNING initial applet not selected".
 INITIAL_APPLET = r'<tr id="{plan_id}">\s*<td\b[^>]*>.*?</td>\s*<td\b[^>]*>(.*?)</td>'
 LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
+# First cell of each plan row: "<name><br> Interaction plan type: <type> ...".
+PLAN_ROW = re.compile(r'<tr id="([^"]+)">\s*<td\b[^>]*>\s*(.*?)<br>\s*Interaction plan type:\s*([^<]*?)\s*<', re.S)
 
 
 class PortalError(Exception):
@@ -148,6 +150,22 @@ def extract_initial_applet(html: str, plan_id: str) -> str | None:
     return html_lib.unescape(link.group(1)).strip() if link else None
 
 
+def extract_plans(html: str) -> list[dict]:
+    """Parse the plan page (applications.asp) into one entry per plan.
+
+    Plan IDs are GUIDs, or older account-style IDs (e.g. "NVMDemo29-4", "3238080946").
+    """
+    plans = []
+    for plan_id, name, plan_type in PLAN_ROW.findall(html):
+        plans.append({
+            "interactionPlanId": plan_id,
+            "interactionPlanName": html_lib.unescape(re.sub(r"\s+", " ", name)).strip(),
+            "type": plan_type.strip(),
+            "initialApplet": extract_initial_applet(html, plan_id),
+        })
+    return plans
+
+
 def encode_properties(props: dict) -> str:
     return base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
@@ -220,6 +238,10 @@ class PortalClient:
         if resp.status_code != 200:
             raise PortalError(f"Downloading {url} failed: HTTP {resp.status_code}")
         return resp.content
+
+    def list_plans(self) -> list[dict]:
+        """All plans of the account, read from the Architect's plan page (no API needed)."""
+        return extract_plans(self._request("GET", "applications.asp").text)
 
     def get_initial_applet(self, plan_id: str) -> str | None:
         """Name of the applet the plan starts with, or None if it is not set."""
