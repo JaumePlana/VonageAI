@@ -2,46 +2,48 @@
 
 from __future__ import annotations
 
-import re
-from typing import Callable
+from typing import Any, Callable
 
-from vccflow.ipm import IpmClient, IpmError
+from vccflow.ipm import IpmError
+from vccflow.manager import ManagerError
 from vccflow.portal import PortalClient, PortalError
-
-UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 ANNOUNCER_TYPE = "DataAnnouncer"
 
 
-def resolve_plan(plan: str, portal: PortalClient, ipm: IpmClient | None) -> tuple[str, str]:
+def _id_and_name(plan: dict) -> tuple[str, str]:
+    """Plan ID and name from an Interaction Manager, IPM or portal plan record."""
+    return plan.get("id") or plan["interactionPlanId"], plan.get("name") or plan["interactionPlanName"]
+
+
+def resolve_plan(plan: str, portal: PortalClient, api: Any | None) -> tuple[str, str]:
     """Return (plan_id, plan_name) for a plan ID or name.
 
-    When the account has the Interaction Plan API, the plan is also looked up there;
-    that API is bound to the account, so a portal session from a different account
-    is caught. Without it (no credentials, or 403 "Feature not enabled"), the plan is
-    looked up on the portal's plan page only.
+    api is a ManagerClient (or IpmClient): any client whose list_plans() returns the
+    account's plans. That API is bound to the account through its credentials, so
+    checking that the portal session sees the same plan catches a session from a
+    different account. Without it (no credentials, or HTTP 403), the plan is looked
+    up on the portal's plan page only, and that check is not possible.
     """
     api_name = None
-    if ipm:
+    plans = None
+    if api:
         try:
-            if UUID.match(plan):
-                api_name = ipm.get_plan(plan)["interactionPlanName"]
-                plan_id = plan
-            else:  # a name, or an older non-GUID plan ID (e.g. "Partner_JPlana-4")
-                matches = [p for p in ipm.list_plans() if plan in (p["interactionPlanId"], p["interactionPlanName"])]
-                if len(matches) != 1:
-                    raise PortalError(f"Expected one plan with ID or name '{plan}', found {len(matches)}")
-                plan_id, api_name = matches[0]["interactionPlanId"], matches[0]["interactionPlanName"]
-        except IpmError as e:
-            if not e.feature_disabled:
+            plans = [_id_and_name(p) for p in api.list_plans()]
+        except (IpmError, ManagerError) as e:
+            if e.status != 403:
                 raise
-            ipm = None  # no API on this account: fall back to the portal
-    if not ipm:
-        plans = portal.list_plans()
-        matches = [p for p in plans if plan in (p["interactionPlanId"], p["interactionPlanName"])]
-        if len(matches) != 1:
-            raise PortalError(f"Expected one plan with ID or name '{plan}' on the portal, found {len(matches)}")
-        plan_id = matches[0]["interactionPlanId"]
+    from_api = plans is not None
+    if not from_api:
+        plans = [_id_and_name(p) for p in portal.list_plans()]
+    by_id = [p for p in plans if p[0] == plan]
+    matches = by_id or [p for p in plans if p[1] == plan]
+    if len(matches) != 1:
+        where = "the API" if from_api else "the portal"
+        raise PortalError(f"Expected one plan with ID or name '{plan}' in {where}, found {len(matches)}")
+    plan_id, name = matches[0]
+    if from_api:
+        api_name = name
 
     portal_name = portal.list_applets(plan_id).get("name")
     if not portal_name:

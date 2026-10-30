@@ -33,6 +33,11 @@ class Account:
         return f"https://{self.region}.api.cc.vonage.com/ipm"
 
     @property
+    def manager_api_url(self) -> str:
+        """API behind VCC Admin's Interaction Manager (plans, mappings, destinations)."""
+        return f"https://{self.region}.api.newvoicemedia.com"
+
+    @property
     def portal_url(self) -> str:
         return f"https://{self.region}.newvoicemedia.com/CallCentre"
 

@@ -25,7 +25,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 ## Status (2026-10-28)
 
 ### Done
-- Python project `vccflow` set up (`.venv`, Python 3.15). 41 unit tests pass.
+- Python project `vccflow` set up (`.venv`, Python 3.15). 48 unit tests pass.
 - Per-account config: `accounts.toml` holds region and variable names; `.env` holds secrets. Configured: `Viessmann-test`, `Viessmann-prod` (emea).
 - Login (client credentials, `interaction-plans:read`) works against Viessmann Test.
 - Read-only commands work: `accounts`, `list-plans` (82 plans in Test), `list-mappings`, `export-plan`, `get`.
@@ -79,5 +79,10 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
   - A Data Connector with nothing next must post `NextApplet`, `NextAppletFailure` and `NextAppletInterfaceFailure` as empty values (`dcwithoutnextapplets.har`); leaving them out is refused.
 - [x] `vccflow copy-plan <plan> <target> --from <account> [--to <account>] [--dry-run]` (2026-10-29): resolves the target first, exports to `exports/<from>/plans/<plan>/`, then imports. Refuses the same plan as source and target.
 - [x] Accounts without the Interaction Plan API (2026-10-30): Demo29's API answers 403 "Feature not enabled" (token and scope are fine). `list-plans` then reads the portal plan page (`applications.asp`: ID, name, type, initial applet), and plan names resolve through the portal for every command. Plan IDs are not always GUIDs: older plans have IDs like `NVMDemo29-4` or `3238080946`. Without the API, the account cross-check is not possible.
-- [ ] Mappings and destinations from the portal: the admin UI is a single-page app calling `https://<region>.api.newvoicemedia.com/...` (e.g. `channels-configuration/`, `interaction-plan/`); needs a HAR of opening those screens.
+- [x] Interaction Manager API (2026-10-30, from `exports/HAR/interactionManager.har`): `https://<region>.api.newvoicemedia.com`, same client-credentials token, Accept `application/vnd.newvoicemedia.v1+json`. **Works on Demo29 too**, where the public IPM API is off.
+  - `interaction-plan/plans` (scope `interaction-plans:read`): includes archived plans (`archived`), `reportingGroup`, `initialApplet`, `interactionProperties`, `description`, `tags`, outbound CLID settings. No `displayInAgentInterface`.
+  - `interaction-plan/mappings` (same scope): `interactionPlan` (plan ID), `priority`, `rules.toAddress.channelAddresses`, `interactionProperties`, `tags` ("Implicit").
+  - `address/{pstn,api,webchat,sms,whatsapp,email}`: destinations per channel; need scope **`addresses:read`**, which neither JPlana's nor Demo29's credentials have (token request answers `invalid_scope`). Add it in VCC Admin to use `list-destinations`.
+  - The portal cookie session is not accepted there (401).
+  - vccflow: `manager.py`; `list-plans` (default source), `list-mappings`, `list-destinations`; plan lookup uses it first (so the account cross-check works on Demo29), then the portal page. Export takes reporting group and agent-interface flag from the public API when available, else the reporting group from here.
 - [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.

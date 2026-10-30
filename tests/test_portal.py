@@ -69,10 +69,10 @@ def test_save_sends_base64_properties():
 def test_resolve_plan_detects_account_mismatch():
     portal = MagicMock()
     portal.list_applets.return_value = {"name": "Some other plan", "applets": []}
-    ipm = MagicMock()
-    ipm.get_plan.return_value = {"interactionPlanName": "zz Claude POC"}
+    api = MagicMock()
+    api.list_plans.return_value = [{"id": PLAN_ID, "name": "zz Claude POC"}]  # Interaction Manager record
     with pytest.raises(PortalError, match="mismatch"):
-        resolve_plan(PLAN_ID, portal, ipm)
+        resolve_plan(PLAN_ID, portal, api)
 
 
 def test_resolve_plan_by_name():

@@ -9,10 +9,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vccflow import export, har, importer, poc
+from vccflow import export, har, importer, manager, poc
 from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
+from vccflow.manager import ManagerClient, ManagerError
 from vccflow.portal import PortalClient, PortalError
 
 
@@ -21,10 +22,15 @@ def _client(args: argparse.Namespace) -> IpmClient:
     return IpmClient(TokenProvider(account))
 
 
-def _portal(args: argparse.Namespace, account_name: str | None = None) -> tuple[PortalClient, IpmClient | None]:
+def _manager(args: argparse.Namespace) -> ManagerClient:
+    return ManagerClient(TokenProvider(load_account(args.account, Path(args.config))))
+
+
+def _portal(args: argparse.Namespace, account_name: str | None = None) -> tuple[PortalClient, ManagerClient | None]:
+    """Portal client, plus the Interaction Manager API client used to look plans up (if credentials exist)."""
     account = load_account(account_name or args.account, Path(args.config))
-    ipm = IpmClient(TokenProvider(account)) if account.has_api_credentials else None
-    return PortalClient(account), ipm
+    api = ManagerClient(TokenProvider(account)) if account.has_api_credentials else None
+    return PortalClient(account), api
 
 
 def _print_json(data) -> None:
@@ -38,31 +44,51 @@ def cmd_accounts(args: argparse.Namespace) -> None:
 
 def cmd_list_plans(args: argparse.Namespace) -> None:
     account = load_account(args.account, Path(args.config))
-    if not args.portal and account.has_api_credentials:
-        try:
-            _print_json(IpmClient(TokenProvider(account)).list_plans())
-            return
-        except IpmError as e:
-            if not e.feature_disabled:
-                raise
-            print(f"Interaction Plan API not enabled for '{account.name}'; reading the portal instead.", file=sys.stderr)
-    _print_json(PortalClient(account).list_plans())
+    if args.source == "portal" or not account.has_api_credentials:
+        _print_json(PortalClient(account).list_plans())
+    elif args.source == "ipm":
+        _print_json(IpmClient(TokenProvider(account)).list_plans())
+    else:
+        _print_json(ManagerClient(TokenProvider(account)).list_plans(include_archived=args.archived))
 
 
 def cmd_list_mappings(args: argparse.Namespace) -> None:
-    _print_json(_client(args).list_mappings())
+    _print_json(_manager(args).list_mappings())
 
 
-def _export(portal: PortalClient, ipm: IpmClient | None, plan: str, out: str | None) -> tuple[Path, str]:
+def cmd_list_destinations(args: argparse.Namespace) -> None:
+    channels = tuple(args.channel) if args.channel else manager.CHANNELS
+    hint = "The API credentials need the scope addresses:read (VCC Admin > API credentials)."
+    try:
+        _print_json(_manager(args).list_destinations(channels))
+    except AuthError as e:  # the scope is not granted: the token request itself is refused
+        if "invalid_scope" not in str(e):
+            raise
+        raise AuthError(f"{e}\n{hint}") from e
+    except ManagerError as e:
+        if e.status != 403:
+            raise
+        raise ManagerError(f"{e}\n{hint}", e.status) from e
+
+
+def _plan_metadata(portal: PortalClient, api: ManagerClient | None, plan_id: str) -> dict | None:
+    """Reporting group and agent-interface flag: from the public IPM API (it has both), else the
+    Interaction Manager API (reporting group only)."""
+    if not api:
+        return None
+    try:
+        return IpmClient(api.tokens).get_plan(plan_id)
+    except IpmError:
+        pass
+    plan = next((p for p in api.list_plans(include_archived=True) if p["id"] == plan_id), None)
+    return {"reportingGroupName": plan.get("reportingGroup"), "displayInAgentInterface": None} if plan else None
+
+
+def _export(portal: PortalClient, api: ManagerClient | None, plan: str, out: str | None) -> tuple[Path, str]:
     """Export a plan; return (export folder, plan ID)."""
     account = portal.account.name
-    plan_id, plan_name = poc.resolve_plan(plan, portal, ipm)
-    try:
-        metadata = ipm.get_plan(plan_id) if ipm else None
-    except IpmError as e:
-        if not e.feature_disabled:
-            raise
-        metadata = None
+    plan_id, plan_name = poc.resolve_plan(plan, portal, api)
+    metadata = _plan_metadata(portal, api, plan_id)
     folder = Path(out or f"exports/{account}/plans/{export._safe_filename(plan_name)}")
     print(f"Exporting '{plan_name}' from '{account}' to {folder}")
     doc = export.export_plan(portal, plan_id, plan_name, folder, metadata=metadata)
@@ -89,23 +115,23 @@ def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, dr
 
 
 def cmd_export_plan(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    _export(portal, ipm, args.plan, args.out)
+    portal, api = _portal(args)
+    _export(portal, api, args.plan, args.out)
 
 
 def cmd_import_plan(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    plan_id, plan_name = poc.resolve_plan(args.target, portal, ipm)
+    portal, api = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.target, portal, api)
     _import(portal, Path(args.source), plan_id, plan_name, args.dry_run)
 
 
 def cmd_copy_plan(args: argparse.Namespace) -> None:
     to_account = args.to_account or args.from_account
     # Resolve the target before exporting, so a wrong name or session fails fast.
-    target, target_ipm = _portal(args, to_account)
-    target_id, target_name = poc.resolve_plan(args.target, target, target_ipm)
-    source, source_ipm = _portal(args, args.from_account)
-    folder, source_id = _export(source, source_ipm, args.plan, args.out)
+    target, target_api = _portal(args, to_account)
+    target_id, target_name = poc.resolve_plan(args.target, target, target_api)
+    source, source_api = _portal(args, args.from_account)
+    folder, source_id = _export(source, source_api, args.plan, args.out)
     if to_account == args.from_account and source_id == target_id:
         raise PortalError("Source and target are the same plan")
     print()
@@ -140,21 +166,21 @@ def cmd_login(args: argparse.Namespace) -> None:
 
 
 def cmd_applets(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    plan_id, _ = poc.resolve_plan(args.plan, portal, ipm)
+    portal, api = _portal(args)
+    plan_id, _ = poc.resolve_plan(args.plan, portal, api)
     _print_json(portal.list_applets(plan_id))
 
 
 def cmd_applet(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    plan_id, _ = poc.resolve_plan(args.plan, portal, ipm)
+    portal, api = _portal(args)
+    plan_id, _ = poc.resolve_plan(args.plan, portal, api)
     state = portal.get_applet_state(plan_id, portal.find_applet(plan_id, args.name))
     _print_json(state["appletProperties"])
 
 
 def cmd_initial_applet(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
+    portal, api = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.plan, portal, api)
     if args.set:
         portal.find_applet(plan_id, args.set)  # fail early on a typo
         portal.set_initial_applet(plan_id, args.set)
@@ -165,8 +191,8 @@ def cmd_initial_applet(args: argparse.Namespace) -> None:
 
 
 def cmd_poc_announcer(args: argparse.Namespace) -> None:
-    portal, ipm = _portal(args)
-    plan_id, plan_name = poc.resolve_plan(args.plan, portal, ipm)
+    portal, api = _portal(args)
+    plan_id, plan_name = poc.resolve_plan(args.plan, portal, api)
     print(f"Plan: {plan_name} ({plan_id}) in account '{args.account}'")
     poc.run_announcer_poc(portal, plan_id, args.name, args.text, voice=args.voice, keep=args.keep)
     print("POC passed.")
@@ -183,10 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--account", "-a", required=True, help="account name from accounts.toml")
         return p
 
-    p = with_account(sub.add_parser("list-plans", help="list interaction plans (API, or the portal if the API is off)"))
-    p.add_argument("--portal", action="store_true", help="read the portal's plan page even if the API is available")
+    p = with_account(sub.add_parser("list-plans", help="list interaction plans"))
+    p.add_argument("--source", choices=("manager", "ipm", "portal"), default="manager",
+                   help="manager: Interaction Manager API (default, richest); ipm: public IPM API; portal: plan page")
+    p.add_argument("--archived", action="store_true", help="include archived plans (manager source)")
     p.set_defaults(func=cmd_list_plans)
-    with_account(sub.add_parser("list-mappings", help="list number/route mappings")).set_defaults(func=cmd_list_mappings)
+    with_account(sub.add_parser("list-mappings", help="list mappings (address -> plan, with rules)")).set_defaults(
+        func=cmd_list_mappings)
+    p = with_account(sub.add_parser("list-destinations", help="list destinations (addresses) per channel"))
+    p.add_argument("--channel", action="append", choices=manager.CHANNELS, help="only this channel (repeatable)")
+    p.set_defaults(func=cmd_list_destinations)
 
     p = with_account(sub.add_parser("export-plan", help="export a plan with all applets and audio files (portal)"))
     p.add_argument("plan", help="plan ID or name")
@@ -251,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
-    except (ConfigError, AuthError, IpmError, PortalError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, PortalError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

@@ -20,14 +20,15 @@ copy accounts.example.toml accounts.toml
 copy .env.example .env
 ```
 
-Edit `accounts.toml` (one section per customer/environment, with its region) and put each account's client ID and secret in `.env`. Create the API credentials in VCC Admin with the `interaction-plans:read` scope. `.env`, `accounts.toml` and `exports/` are git-ignored.
+Edit `accounts.toml` (one section per customer/environment, with its region) and put each account's client ID and secret in `.env`. Create the API credentials in VCC Admin with the `interaction-plans:read` scope (and `addresses:read` for `list-destinations`). `.env`, `accounts.toml` and `exports/` are git-ignored.
 
 ## Usage
 
 ```powershell
 vccflow accounts
-vccflow list-plans    -a acme-test               # falls back to the portal if the API is off; --portal to force it
-vccflow list-mappings -a acme-test
+vccflow list-plans    -a acme-test               # Interaction Manager API; --archived, --source ipm|portal
+vccflow list-mappings -a acme-test               # address -> plan, with rules and interaction properties
+vccflow list-destinations -a acme-test           # addresses per channel (needs scope addresses:read); --channel pstn
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 vccflow har           exports/HAR/architect.har   # offline: sanitize a browser recording (keep HARs in exports/HAR/)
 ```
