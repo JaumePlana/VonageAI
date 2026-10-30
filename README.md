@@ -29,7 +29,7 @@ vccflow accounts
 vccflow list-plans    -a acme-test
 vccflow list-mappings -a acme-test
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
-vccflow har           exports/architect.har       # offline: sanitize a browser recording
+vccflow har           exports/HAR/architect.har   # offline: sanitize a browser recording (keep HARs in exports/HAR/)
 ```
 
 ### Portal (applets)

@@ -197,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_get)
 
     p = sub.add_parser("har", help="sanitize a browser HAR recording and list its API calls (offline)")
-    p.add_argument("file", help="HAR file, e.g. exports/architect.har")
+    p.add_argument("file", help="HAR file, e.g. exports/HAR/architect.har")
     p.add_argument("--keep-static", action="store_true", help="keep scripts, styles, images and fonts")
     p.set_defaults(func=cmd_har)
 
