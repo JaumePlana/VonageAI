@@ -25,7 +25,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 ## Status (2026-10-28)
 
 ### Done
-- Python project `vccflow` set up (`.venv`, Python 3.15). 48 unit tests pass.
+- Python project `vccflow` set up (`.venv`, Python 3.15). 53 unit tests pass.
 - Per-account config: `accounts.toml` holds region and variable names; `.env` holds secrets. Configured: `Viessmann-test`, `Viessmann-prod` (emea).
 - Login (client credentials, `interaction-plans:read`) works against Viessmann Test.
 - Read-only commands work: `accounts`, `list-plans` (82 plans in Test), `list-mappings`, `export-plan`, `get`.
@@ -84,5 +84,6 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
   - `interaction-plan/mappings` (same scope): `interactionPlan` (plan ID), `priority`, `rules.toAddress.channelAddresses`, `interactionProperties`, `tags` ("Implicit").
   - `address/{pstn,api,webchat,sms,whatsapp,email}`: destinations per channel; need scope **`addresses:read`**, which neither JPlana's nor Demo29's credentials have (token request answers `invalid_scope`). Add it in VCC Admin to use `list-destinations`.
   - The portal cookie session is not accepted there (401).
+  - **Portal login token** (2026-10-30, the user allowed it): the portal page's `oidcSettings` (implicit flow, client `contactworld_oidc_client`, scopes include `addresses:write` and `interaction-plans:write`) is renewed silently through `<host>/Auth/connect/authorize?...&prompt=none` with the login cookies; the token is in the redirect fragment. `portal_token.py` does the same, requests only the scope needed (`openid addresses:write` for destinations), keeps it in memory, and is used only for reads. The list commands fall back to it when the API credentials lack the scope or the account has none. Works on JPlana (3 PSTN, 18 API destinations, matching the HAR) and Demo29 (3 PSTN, 9 API; webchat, SMS and WhatsApp not enabled there).
   - vccflow: `manager.py`; `list-plans` (default source), `list-mappings`, `list-destinations`; plan lookup uses it first (so the account cross-check works on Demo29), then the portal page. Export takes reporting group and agent-interface flag from the public API when available, else the reporting group from here.
 - [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.

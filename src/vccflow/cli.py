@@ -15,6 +15,7 @@ from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
 from vccflow.manager import ManagerClient, ManagerError
 from vccflow.portal import PortalClient, PortalError
+from vccflow.portal_token import PortalTokenProvider
 
 
 def _client(args: argparse.Namespace) -> IpmClient:
@@ -23,7 +24,25 @@ def _client(args: argparse.Namespace) -> IpmClient:
 
 
 def _manager(args: argparse.Namespace) -> ManagerClient:
-    return ManagerClient(TokenProvider(load_account(args.account, Path(args.config))))
+    """Interaction Manager API client: API credentials if the account has them, else the portal login."""
+    account = load_account(args.account, Path(args.config))
+    if account.has_api_credentials:
+        return ManagerClient(TokenProvider(account))
+    print(f"No API credentials for '{account.name}'; using the portal login.", file=sys.stderr)
+    return ManagerClient(PortalTokenProvider(account))
+
+
+def _with_portal_login_fallback(args: argparse.Namespace, call):
+    """Run call(client); if the API credentials lack the scope, retry with the portal login's token."""
+    client = _manager(args)
+    try:
+        return call(client)
+    except (AuthError, ManagerError) as e:
+        refused = "invalid_scope" in str(e) or getattr(e, "status", None) == 403
+        if not refused or isinstance(client.tokens, PortalTokenProvider):
+            raise
+    print(f"The API credentials of '{args.account}' lack the scope; using the portal login.", file=sys.stderr)
+    return call(ManagerClient(PortalTokenProvider(client.tokens.account)))
 
 
 def _portal(args: argparse.Namespace, account_name: str | None = None) -> tuple[PortalClient, ManagerClient | None]:
@@ -44,31 +63,21 @@ def cmd_accounts(args: argparse.Namespace) -> None:
 
 def cmd_list_plans(args: argparse.Namespace) -> None:
     account = load_account(args.account, Path(args.config))
-    if args.source == "portal" or not account.has_api_credentials:
+    if args.source == "portal":
         _print_json(PortalClient(account).list_plans())
     elif args.source == "ipm":
         _print_json(IpmClient(TokenProvider(account)).list_plans())
     else:
-        _print_json(ManagerClient(TokenProvider(account)).list_plans(include_archived=args.archived))
+        _print_json(_with_portal_login_fallback(args, lambda c: c.list_plans(include_archived=args.archived)))
 
 
 def cmd_list_mappings(args: argparse.Namespace) -> None:
-    _print_json(_manager(args).list_mappings())
+    _print_json(_with_portal_login_fallback(args, lambda c: c.list_mappings()))
 
 
 def cmd_list_destinations(args: argparse.Namespace) -> None:
     channels = tuple(args.channel) if args.channel else manager.CHANNELS
-    hint = "The API credentials need the scope addresses:read (VCC Admin > API credentials)."
-    try:
-        _print_json(_manager(args).list_destinations(channels))
-    except AuthError as e:  # the scope is not granted: the token request itself is refused
-        if "invalid_scope" not in str(e):
-            raise
-        raise AuthError(f"{e}\n{hint}") from e
-    except ManagerError as e:
-        if e.status != 403:
-            raise
-        raise ManagerError(f"{e}\n{hint}", e.status) from e
+    _print_json(_with_portal_login_fallback(args, lambda c: c.list_destinations(channels)))
 
 
 def _plan_metadata(portal: PortalClient, api: ManagerClient | None, plan_id: str) -> dict | None:

@@ -59,6 +59,17 @@ class ManagerClient:
         """Mappings as {id, name, interactionPlan (plan ID), priority, rules, interactionProperties, ...}."""
         return self.get(MAPPINGS_PATH)
 
-    def list_destinations(self, channels: tuple[str, ...] = CHANNELS) -> dict[str, list[dict]]:
-        """Destinations per channel, e.g. {"pstn": [{address, name, active, ...}], ...}."""
-        return {c: self.get(f"address/{c}", scope=ADDRESSES_SCOPE) for c in channels}
+    def list_destinations(self, channels: tuple[str, ...] = CHANNELS) -> dict[str, list[dict] | None]:
+        """Destinations per channel, e.g. {"pstn": [{address, name, active, ...}], ...}.
+
+        A channel the account does not have (403 "Feature not enabled") maps to None.
+        """
+        out: dict[str, list[dict] | None] = {}
+        for c in channels:
+            try:
+                out[c] = self.get(f"address/{c}", scope=ADDRESSES_SCOPE)
+            except ManagerError as e:
+                if e.status != 403 or "Feature not enabled" not in str(e):
+                    raise
+                out[c] = None
+        return out
