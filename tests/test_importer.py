@@ -79,6 +79,11 @@ class FakePortal:
         self.writes.append(("initial", name))
         self.initial = name
 
+    data_sources = None  # None: the account's list cannot be read
+
+    def list_data_sources(self, plan_id):
+        return self.data_sources
+
 
 def test_check_plan_reports_conflicts_and_dangling_connections(tmp_path):
     doc = plan_doc()
@@ -139,3 +144,72 @@ def test_compare_ignores_line_endings_and_spots_differences():
     b["applets"][1]["next"] = {}
     b["plan"]["initialApplet"] = None
     assert len(compare(a, b)) == 2
+
+
+def with_menu():
+    doc = plan_doc()
+    doc["applets"].append({"name": "MNU M", "type": "Menu", "settings": {}, "next": {"NextApplet": "ANN A"}})
+    doc["applets"][1]["next"] = {"NextApplet": "MNU M"}  # LOG B -> MNU M
+    return doc
+
+
+def test_drop_unsupported_unsets_connections_to_skipped_applets():
+    from vccflow.importer import drop_unsupported
+
+    doc, notes = drop_unsupported(with_menu())
+    assert [a["name"] for a in doc["applets"]] == ["ANN A", "LOG B", "DC C"]
+    assert doc["applets"][1]["next"] == {}
+    assert any("skipped 'MNU M'" in n for n in notes) and any("LOG B" in n and "left unset" in n for n in notes)
+
+
+def test_skip_unsupported_imports_the_rest(tmp_path, monkeypatch):
+    write_plan(tmp_path, with_menu())
+    portal = FakePortal()
+    with pytest.raises(PortalError, match="Menu is not supported"):
+        import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None)
+    assert portal.writes == []
+
+    expected = plan_doc()
+    expected["applets"][1]["next"] = {}
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: expected)
+    diffs = import_plan(portal, tmp_path, TARGET, "zz Claude POC", skip_unsupported=True, log=lambda _: None)
+    assert diffs == []
+    assert "MNU M" not in portal.applets and "NextApplet" not in portal.applets["LOG B"]["props"]
+
+
+def doc_reading(*names):
+    doc = plan_doc()
+    doc["applets"][1]["settings"]["DataSources"] = [{"Key": "LOG", "Value": " ".join(f"$({n})" for n in names)}]
+    return doc
+
+
+def test_missing_data_sources_warn_by_default(tmp_path, monkeypatch):
+    doc = doc_reading("Case Country", "LOG", "VoiceCall|ID")
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    portal.data_sources = {"VoiceCall|Id"}
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: doc)
+    logs = []
+    assert import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=logs.append) == []
+    warnings = [m for m in logs if m.startswith("WARNING")]
+    # LOG is set by the plan; VoiceCall|ID exists as VoiceCall|Id (names ignore case)
+    assert len(warnings) == 1 and "'Case Country' is used by LOG B but" in warnings[0]
+    assert any("exists in the target account as 'VoiceCall|Id'" in m for m in logs)
+    assert portal.writes  # imported anyway
+
+
+def test_require_data_sources_stops_before_any_write(tmp_path):
+    write_plan(tmp_path, doc_reading("Case Country"))
+    portal = FakePortal()
+    portal.data_sources = {"log"}
+    with pytest.raises(PortalError, match="'Case Country'"):
+        import_plan(portal, tmp_path, TARGET, "zz Claude POC", require_data_sources=True, log=lambda _: None)
+    assert portal.writes == []
+
+
+def test_compare_treats_letter_case_as_a_note():
+    a = plan_doc()
+    b = json.loads(json.dumps(a))
+    b["applets"][1]["settings"]["DataSources"][0]["Key"] = "Log"
+    notes = []
+    assert compare(a, b, notes) == [] and "letter case" in notes[0]

@@ -14,6 +14,7 @@ from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
 from vccflow.manager import ManagerClient, ManagerError
+from vccflow.media_channels import MediaChannelsClient, MediaChannelsError
 from vccflow.portal import PortalClient, PortalError
 from vccflow.portal_token import PortalTokenProvider
 
@@ -77,6 +78,17 @@ def cmd_list_mappings(args: argparse.Namespace) -> None:
 
 def cmd_list_destinations(args: argparse.Namespace) -> None:
     channels = tuple(args.channel) if args.channel else manager.CHANNELS
+    account = load_account(args.account, Path(args.config))
+    if args.source == "media-channels" and account.has_api_credentials:
+        try:
+            _print_json(MediaChannelsClient(TokenProvider(account)).list_destinations(channels))
+            return
+        except (AuthError, MediaChannelsError) as e:
+            refused = "invalid_scope" in str(e) or getattr(e, "status", None) == 403
+            if not refused:
+                raise
+            print(f"The API credentials of '{account.name}' cannot use the Media Channels API (scope admin:read); "
+                  "using the Interaction Manager instead.", file=sys.stderr)
     _print_json(_with_portal_login_fallback(args, lambda c: c.list_destinations(channels)))
 
 
@@ -105,13 +117,19 @@ def _export(portal: PortalClient, api: ManagerClient | None, plan: str, out: str
     print(f"Saved {folder / 'plan.json'}: {len(doc['applets'])} applets, {n_media} media files")
     if doc["requires"]["dataSources"]:
         print(f"Data sources used: {', '.join(doc['requires']['dataSources'])}")
+    if doc["requires"]["dataSourcesNeeded"]:
+        print(f"Of these, not set by the plan itself (must exist in a target account): "
+              f"{', '.join(doc['requires']['dataSourcesNeeded'])}")
     if any(a.get("type") == "DataRetriever" for a in doc["applets"]):
         print("NOTE: Data Connector definitions are exported as-is and may contain credentials. Keep exports private.")
     return folder, plan_id
 
 
-def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, dry_run: bool) -> None:
-    diffs = importer.import_plan(portal, source, plan_id, plan_name, dry_run=dry_run)
+def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, args: argparse.Namespace) -> None:
+    dry_run = args.dry_run
+    diffs = importer.import_plan(portal, source, plan_id, plan_name, dry_run=dry_run,
+                                 skip_unsupported=args.skip_unsupported,
+                                 require_data_sources=args.require_data_sources)
     if dry_run:
         print("Dry run: nothing was changed.")
     elif diffs:
@@ -131,7 +149,7 @@ def cmd_export_plan(args: argparse.Namespace) -> None:
 def cmd_import_plan(args: argparse.Namespace) -> None:
     portal, api = _portal(args)
     plan_id, plan_name = poc.resolve_plan(args.target, portal, api)
-    _import(portal, Path(args.source), plan_id, plan_name, args.dry_run)
+    _import(portal, Path(args.source), plan_id, plan_name, args)
 
 
 def cmd_copy_plan(args: argparse.Namespace) -> None:
@@ -144,7 +162,7 @@ def cmd_copy_plan(args: argparse.Namespace) -> None:
     if to_account == args.from_account and source_id == target_id:
         raise PortalError("Source and target are the same plan")
     print()
-    _import(target, folder, target_id, target_name, args.dry_run)
+    _import(target, folder, target_id, target_name, args)
 
 
 def cmd_get(args: argparse.Namespace) -> None:
@@ -227,6 +245,9 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_list_mappings)
     p = with_account(sub.add_parser("list-destinations", help="list destinations (addresses) per channel"))
     p.add_argument("--channel", action="append", choices=manager.CHANNELS, help="only this channel (repeatable)")
+    p.add_argument("--source", choices=("media-channels", "manager"), default="media-channels",
+                   help="media-channels: Media Channels API (default, scope admin:read); "
+                        "manager: Interaction Manager API (falls back to the portal login)")
     p.set_defaults(func=cmd_list_destinations)
 
     p = with_account(sub.add_parser("export-plan", help="export a plan with all applets and audio files (portal)"))
@@ -238,6 +259,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("source", help="export folder with plan.json, e.g. \"exports/JPlana/plans/DISH Web Services\"")
     p.add_argument("target", help="target plan ID or name (in --account)")
     p.add_argument("--dry-run", action="store_true", help="only run the checks")
+    p.add_argument("--skip-unsupported", action="store_true",
+                   help="leave out applets that cannot be imported yet; connections to them stay unset")
+    p.add_argument("--require-data-sources", action="store_true",
+                   help="stop before writing if the target account lacks data sources the plan reads "
+                        "(default: warn and import anyway)")
     p.set_defaults(func=cmd_import_plan)
 
     p = sub.add_parser("copy-plan", help="export a plan and import it into another plan (portal, writes)")
@@ -247,6 +273,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", dest="to_account", help="target account (default: the --from account)")
     p.add_argument("--out", help="export folder (default: exports/<from account>/plans/<plan name>)")
     p.add_argument("--dry-run", action="store_true", help="export, then only run the import checks")
+    p.add_argument("--skip-unsupported", action="store_true",
+                   help="leave out applets that cannot be imported yet; connections to them stay unset")
+    p.add_argument("--require-data-sources", action="store_true",
+                   help="stop before writing if the target account lacks data sources the plan reads "
+                        "(default: warn and import anyway)")
     p.set_defaults(func=cmd_copy_plan)
 
     p = with_account(sub.add_parser("get", help="raw GET on any IPM path, for exploring the API"))
@@ -292,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
-    except (ConfigError, AuthError, IpmError, ManagerError, PortalError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

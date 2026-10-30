@@ -106,3 +106,20 @@ def test_export_plan_writes_portable_document(tmp_path):
     assert doc["plan"]["initialApplet"] == "ANN Audio"
     assert set(doc["requires"]["dataSources"]) >= {"LOG", "ANN_Welcome", "CustomerReference", "ResponseCode", "accessToken"}
     assert PLAN_ID not in json.dumps(doc["applets"])  # nothing tied to the source plan
+
+
+def test_created_versus_used_data_sources():
+    from vccflow.export import data_sources_created, data_sources_needed, data_sources_used
+
+    sds = {"settings": {"DataSources": [{"Key": "LOG", "Value": "x $(Case Country)"}]}}
+    ws = {"settings": {"ApiInteractionDefinition": "<Url>$(JavascriptEngineUrl)</Url><Destination>Language</Destination>"}}
+    sf = {"settings": {"Action": "GetSalesforceData", "ResponseItems": ["Case|Origin"],
+                       "CrmRetrievalViewModel": {"MatchDataSource": "CallGuid", "MaxRecords": 2}}}
+    soql = {"settings": {"Action": "GetSalesforceData",
+                         "CrmRetrievalViewModel": {"UseRawSoql": True, "Soql": "SELECT Status, Id FROM Case LIMIT 1"}}}
+    assert data_sources_created(sds) == {"LOG"} and data_sources_used(sds) == {"Case Country"}
+    assert data_sources_created(ws) == {"Language"} and data_sources_used(ws) == {"JavascriptEngineUrl"}
+    assert data_sources_created(sf) == {"Case|Origin", "Case(1)|Origin", "Case(2)|Origin"}
+    assert data_sources_created(soql) == {"Case|Status", "Case|Id"}
+    reads_log = {"settings": {"Text": "$(LOG) $(Case|Origin)"}}
+    assert data_sources_needed([sds, ws, sf, reads_log]) == {"Case Country", "JavascriptEngineUrl", "CallGuid"}

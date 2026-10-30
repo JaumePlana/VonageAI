@@ -36,6 +36,7 @@ DC_NOT_CONFIG = {
 DC_SUB_NOT_CONFIG = {"MatchBys", "MetabaseDetails", "DataSourceTypes", "IvrSlotDetails"}
 PLACEHOLDER = re.compile(r"\$\(([^)]+)\)")
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
+SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
 
 
 def _is_next_key(key: str) -> bool:
@@ -79,34 +80,74 @@ def _clear_media_id(settings: dict, path: str) -> None:
     node["AppletMedia"] = {**node["AppletMedia"], "Id": None, "AccountId": 0}
 
 
-def collect_data_sources(applet: dict) -> set[str]:
-    """Data source names an applet reads or writes; they must exist in the target account."""
-    found: set[str] = set()
-    settings = applet.get("settings", {})
-    for ds in settings.get("DataSources") or []:
-        if ds.get("Key"):
-            found.add(ds["Key"])
-    if settings.get("DataSource"):
-        found.add(settings["DataSource"])
-    if (settings.get("CrmRetrievalViewModel") or {}).get("MatchDataSource"):
-        found.add(settings["CrmRetrievalViewModel"]["MatchDataSource"])
-    for p in (settings.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
+def _strings(v: Any):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def data_sources_created(applet: dict) -> set[str]:
+    """Data sources the applet sets, so they need not exist in the target account beforehand.
+
+    Set Data Source keys; Data Connector outputs: Web Service <Destination> and
+    <ResponseCodeDestination>, and the fields a Salesforce get returns ("Object|Field",
+    or "Object(n)|Field" when several records are retrieved; raw SOQL: the selected fields).
+    """
+    s = applet.get("settings", {})
+    found = {ds["Key"] for ds in s.get("DataSources") or [] if ds.get("Key")}
+    for text in _strings(s):
+        found.update(x.strip() for x in XML_DESTINATION.findall(text))
+    crm = s.get("CrmRetrievalViewModel") or {}
+    if s.get("Action") == "GetSalesforceData":
+        fields = list(s.get("ResponseItems") or [])
+        soql = SOQL_SELECT.search(crm.get("Soql") or "") if crm.get("UseRawSoql") else None
+        if soql:
+            obj = soql.group(2)
+            fields = [f"{obj}|{f.strip()}" for f in soql.group(1).split(",")]
+        records = int(crm.get("MaxRecords") or 1) if not soql else 1
+        for f in fields:
+            found.add(f)
+            if records > 1 and "|" in f:
+                obj, field = f.split("|", 1)
+                found.update(f"{obj}({i})|{field}" for i in range(1, records + 1))
+    return found
+
+
+def data_sources_used(applet: dict) -> set[str]:
+    """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
+    a Salesforce match data source and the values a Salesforce update writes."""
+    s = applet.get("settings", {})
+    found = set()
+    for text in _strings(s):
+        found.update(PLACEHOLDER.findall(text))
+    if s.get("DataSource"):
+        found.add(s["DataSource"])
+    if (s.get("CrmRetrievalViewModel") or {}).get("MatchDataSource"):
+        found.add(s["CrmRetrievalViewModel"]["MatchDataSource"])
+    for p in (s.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
         if p.get("DataSourceType") == 0 and p.get("Value"):
             found.add(p["Value"])
-
-    def scan(v: Any) -> None:
-        if isinstance(v, str):
-            found.update(PLACEHOLDER.findall(v))
-            found.update(s.strip() for s in XML_DESTINATION.findall(v))
-        elif isinstance(v, dict):
-            for x in v.values():
-                scan(x)
-        elif isinstance(v, list):
-            for x in v:
-                scan(x)
-
-    scan(settings)
     return found
+
+
+def collect_data_sources(applet: dict) -> set[str]:
+    """All data source names an applet sets or reads."""
+    return data_sources_created(applet) | data_sources_used(applet)
+
+
+def data_sources_needed(applets: list[dict]) -> set[str]:
+    """Data sources the plan reads but never sets itself: they should exist in the target account.
+
+    Data source names are not case-sensitive in VCC ("LOG" and "Log" are the same).
+    """
+    created = {n.lower() for a in applets for n in data_sources_created(a)}
+    used = set().union(*(data_sources_used(a) for a in applets)) if applets else set()
+    return {n for n in used if n.lower() not in created}
 
 
 def _safe_filename(name: str) -> str:
@@ -198,7 +239,7 @@ def export_plan(
             **({"reportingGroupName": metadata.get("reportingGroupName"),
                 "displayInAgentInterface": metadata.get("displayInAgentInterface")} if metadata else {}),
         },
-        "requires": {"dataSources": data_sources},
+        "requires": {"dataSources": data_sources, "dataSourcesNeeded": sorted(data_sources_needed(applets))},
         "applets": applets,
     }
     (out_dir / "plan.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")

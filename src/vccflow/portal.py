@@ -248,6 +248,31 @@ class PortalClient:
         html = self._request("GET", f"applications.asp?phonenum={quote(plan_id)}").text
         return extract_initial_applet(html, plan_id)
 
+    def list_data_sources(self, plan_id: str | None = None) -> set[str] | None:
+        """The account's data source names, as the applet editors list them.
+
+        Every Announcer, Set Data Source and Data Connector page carries the account's
+        list (metabase entries). It is read from the first such applet found, in plan_id
+        first, then in the account's other plans. None if the account has no such applet.
+        """
+        plan_ids = [plan_id] if plan_id else []
+        plan_ids += [p["interactionPlanId"] for p in self.list_plans() if p["interactionPlanId"] != plan_id]
+        for pid in plan_ids:
+            for applet in self.list_applets(pid).get("applets", []):
+                url = applet.get("configUrl") or ""
+                try:
+                    if url.startswith("DataRetriever"):
+                        entries = self.get_data_connector(applet)["model"].get("MetabaseEntries")
+                    elif url.startswith("Applet?"):
+                        entries = (self.get_applet_state(pid, applet).get("dataSourceKeys") or {}).get("metabaseEntries")
+                    else:
+                        continue
+                except PortalError:
+                    continue
+                if entries is not None:
+                    return set(entries)
+        return None
+
     def find_applet(self, plan_id: str, name: str) -> dict:
         for a in self.list_applets(plan_id).get("applets", []):
             if a["name"] == name:

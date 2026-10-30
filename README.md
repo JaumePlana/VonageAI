@@ -28,12 +28,12 @@ Edit `accounts.toml` (one section per customer/environment, with its region) and
 vccflow accounts
 vccflow list-plans    -a acme-test               # Interaction Manager API; --archived, --source ipm|portal
 vccflow list-mappings -a acme-test               # address -> plan, with rules and interaction properties
-vccflow list-destinations -a acme-test           # addresses per channel; --channel pstn
+vccflow list-destinations -a acme-test           # addresses per channel (Media Channels API, scope admin:read); --channel pstn
 vccflow get           -a acme-test <any/ipm/path> # raw GET for exploring
 vccflow har           exports/HAR/architect.har   # offline: sanitize a browser recording (keep HARs in exports/HAR/)
 ```
 
-When the API credentials lack a scope (e.g. `addresses:read` for destinations) or the account has none, the list commands use the token of your portal login instead (`vccflow login`), the way VCC Admin's pages do. It acts as you, is used only for reads, and is kept in memory only.
+When the API credentials lack a scope or the account has none, the list commands use the token of your portal login instead (`vccflow login`), the way VCC Admin's pages do. It acts as you, is used only for reads, and is kept in memory only.
 
 ### Portal (applets)
 
@@ -50,7 +50,7 @@ vccflow import-plan   -a JPlana "exports/JPlana/plans/DISH Web Services" "zz Cla
 vccflow copy-plan     --from JPlana "DISH Web Services" "zz Claude POC" --dry-run   # both steps; --to <account> for another account
 ```
 
-`import-plan` copies an export into an existing plan of `--account`: it checks everything first (`--dry-run` stops there), creates all applets, saves them with connections by name, uploads audio, sets the initial applet, then exports the target again and compares. On a failed write it deletes the applets it created. `copy-plan` runs the export and the import in one go; the export folder stays under `exports/` for reference.
+`import-plan` copies an export into an existing plan of `--account`: it checks everything first (`--dry-run` stops there), creates all applets, saves them with connections by name, uploads audio, sets the initial applet, then exports the target again and compares. On a failed write it deletes the applets it created. `--skip-unsupported` leaves out applets that cannot be imported yet (e.g. Menu) and lists them; connections to them stay unset. Before writing, it also checks the data sources: those the plan reads but does not set itself (Set Data Source keys and Data Connector outputs count as set) should exist in the target account; the portal saves applets without checking. Missing ones are reported as warnings and the import goes ahead; `--require-data-sources` stops it before any write instead. Names are not case-sensitive (`LOG` and `Log` are the same data source). `copy-plan` runs the export and the import in one go; the export folder stays under `exports/` for reference.
 
 The export drops IDs that belong to one account, keeps connections by applet name, records the initial applet, and downloads uploaded audio files. Data Connector definitions are exported as-is and can contain credentials.
 

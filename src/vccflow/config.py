@@ -33,6 +33,11 @@ class Account:
         return f"https://{self.region}.api.cc.vonage.com/ipm"
 
     @property
+    def media_channels_url(self) -> str:
+        """Media Channels API (destinations per channel)."""
+        return f"https://{self.region}.api.cc.vonage.com/media-channels"
+
+    @property
     def manager_api_url(self) -> str:
         """API behind VCC Admin's Interaction Manager (plans, mappings, destinations)."""
         return f"https://{self.region}.api.newvoicemedia.com"

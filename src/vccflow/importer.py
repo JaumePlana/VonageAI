@@ -11,6 +11,7 @@ fails, the applets created by this import are deleted again.
 
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 from pathlib import Path
@@ -34,6 +35,44 @@ def load_plan(plan_dir: Path) -> dict:
     return doc
 
 
+def unsupported_reason(applet: dict) -> str | None:
+    """Why this applet cannot be imported yet, or None if it can."""
+    if applet.get("unsupported"):
+        return f"was not exported: {applet['unsupported']}"
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR}:
+        return f"applet type {applet['type']} is not supported for import yet"
+    if applet["type"] == DATA_CONNECTOR:
+        try:
+            data_connector_form(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+    return None
+
+
+def drop_unsupported(doc: dict) -> tuple[dict, list[str]]:
+    """Return (doc without the applets that cannot be imported, notes on what was left out).
+
+    Connections to a left-out applet, and the initial applet if it is one, are left unset.
+    """
+    skipped = {a["name"]: r for a in doc["applets"] if (r := unsupported_reason(a))}
+    notes = [f"skipped '{name}': {reason}" for name, reason in skipped.items()]
+    applets = []
+    for a in doc["applets"]:
+        if a["name"] in skipped:
+            continue
+        a = copy.deepcopy(a)
+        for key, target in list(a.get("next", {}).items()):
+            if target in skipped:
+                del a["next"][key]
+                notes.append(f"'{a['name']}'.{key} pointed to skipped '{target}': left unset")
+        applets.append(a)
+    plan = dict(doc["plan"])
+    if plan.get("initialApplet") in skipped:
+        notes.append(f"initial applet '{plan['initialApplet']}' was skipped: not set")
+        plan["initialApplet"] = None
+    return {**doc, "plan": plan, "applets": applets}, notes
+
+
 def check_plan(doc: dict, plan_dir: Path, existing: set[str]) -> list[str]:
     """Return the problems that would stop an import into a plan with these applet names."""
     problems = []
@@ -41,19 +80,14 @@ def check_plan(doc: dict, plan_dir: Path, existing: set[str]) -> list[str]:
     for name in sorted(names & existing):
         problems.append(f"'{name}' already exists in the target plan")
     for a in doc["applets"]:
-        if a.get("unsupported"):
-            problems.append(f"'{a['name']}' was not exported: {a['unsupported']}")
-            continue
-        if a["type"] not in EDITOR_TYPES | {DATA_CONNECTOR}:
-            problems.append(f"'{a['name']}': applet type {a['type']} is not supported for import yet")
+        reason = unsupported_reason(a)
+        if reason:
+            problems.append(f"'{a['name']}': {reason}")
+            if a.get("unsupported"):
+                continue
         for key, target in a.get("next", {}).items():
             if target not in names:
                 problems.append(f"'{a['name']}'.{key} points to '{target}', which is not in the plan")
-        if a["type"] == DATA_CONNECTOR:
-            try:
-                data_connector_form(a["settings"], a.get("next", {}))
-            except PortalError as e:
-                problems.append(f"'{a['name']}': {e}")
         for m in a.get("media", []):
             f = plan_dir / m["file"]
             if not f.exists():
@@ -64,6 +98,32 @@ def check_plan(doc: dict, plan_dir: Path, existing: set[str]) -> list[str]:
     if initial and initial not in names:
         problems.append(f"Initial applet '{initial}' is not in the plan")
     return problems
+
+
+def check_data_sources(applets: list[dict], existing: set[str]) -> tuple[list[str], list[str]]:
+    """Return (missing, notes) for the data sources the plan reads but does not set itself.
+
+    Names are not case-sensitive: one that exists with other letter case counts as
+    existing, and the portal keeps the account's spelling (e.g. "LOG" becomes "Log").
+    """
+    lower = {e.lower(): e for e in existing}
+    users: dict[str, list[str]] = {}
+    for a in applets:
+        for n in export.data_sources_used(a):
+            users.setdefault(n.lower(), []).append(a["name"])
+    missing, notes = [], []
+    for name in sorted(export.data_sources_needed(applets)):
+        found = lower.get(name.lower())
+        if found is None:
+            used_by = ", ".join(sorted(set(users.get(name.lower(), []))))
+            missing.append(f"data source '{name}' is used by {used_by} but does not exist in the target account")
+        elif found != name:
+            notes.append(f"data source '{name}' exists in the target account as '{found}'")
+    for name in sorted({n for a in applets for n in export.data_sources_created(a)}):
+        found = lower.get(name.lower())
+        if found is not None and found != name:
+            notes.append(f"data source '{name}' set by the plan exists in the target account as '{found}'")
+    return missing, notes
 
 
 def _set_path(props: dict, path: str, media_id: int) -> None:
@@ -84,7 +144,7 @@ def _comparable(applet: dict) -> dict:
     }
 
 
-def compare(source: dict, copy: dict) -> list[str]:
+def compare(source: dict, copy: dict, notes: list[str] | None = None) -> list[str]:
     diffs = []
     src = {a["name"]: _comparable(a) for a in source["applets"]}
     dst = {a["name"]: _comparable(a) for a in copy["applets"]}
@@ -97,7 +157,13 @@ def compare(source: dict, copy: dict) -> list[str]:
             if got[part] != want[part]:
                 diffs.append(f"'{name}' {part}: source {want[part]}, copy {got[part]}")
         for k in sorted(set(want["settings"]) | set(got["settings"])):
-            if want["settings"].get(k) != got["settings"].get(k):
+            w, g = want["settings"].get(k), got["settings"].get(k)
+            if w == g:
+                continue
+            if notes is not None and json.dumps(w).lower() == json.dumps(g).lower():
+                notes.append(f"'{name}' setting {k} differs only in letter case "
+                             "(the portal uses the account's spelling of data source names)")
+            else:
                 diffs.append(f"'{name}' setting {k} differs")
     if source["plan"].get("initialApplet") != copy["plan"].get("initialApplet"):
         diffs.append(f"initial applet: source {source['plan'].get('initialApplet')!r}, "
@@ -111,14 +177,38 @@ def import_plan(
     target_plan_id: str,
     target_plan_name: str,
     dry_run: bool = False,
+    skip_unsupported: bool = False,
+    require_data_sources: bool = False,
     log: Callable[[str], None] = print,
 ) -> list[str]:
-    """Copy the exported plan in plan_dir into the target plan. Return the read-back differences."""
+    """Copy the exported plan in plan_dir into the target plan. Return the read-back differences.
+
+    With skip_unsupported, applets that cannot be imported yet are left out (see drop_unsupported).
+    Data sources the plan reads but does not set should exist in the target account. Missing
+    ones are a warning (the portal saves such applets anyway); with require_data_sources
+    they stop the import before any write.
+    """
     doc = load_plan(plan_dir)
+    if skip_unsupported:
+        doc, notes = drop_unsupported(doc)
+        for n in notes:
+            log(f"NOTE: {n}")
     listing = portal.list_applets(target_plan_id)
     if listing.get("name") != target_plan_name:
         raise PortalError(f"Target plan is '{listing.get('name')}', expected '{target_plan_name}'")
     problems = check_plan(doc, plan_dir, {a["name"] for a in listing.get("applets", [])})
+    existing = portal.list_data_sources(target_plan_id)
+    if existing is None:
+        log("WARNING: could not read the target account's data sources (no applet to read them from); not checked")
+    else:
+        missing, notes = check_data_sources(doc["applets"], existing)
+        for n in notes:
+            log(f"NOTE: {n}")
+        if require_data_sources:
+            problems += missing
+        else:
+            for m in missing:
+                log(f"WARNING: {m}")
     if problems:
         raise PortalError("Cannot import:\n  " + "\n  ".join(problems))
     applets = doc["applets"]
@@ -176,4 +266,8 @@ def import_plan(
         copy = export.export_plan(portal, target_plan_id, target_plan_name, Path(tmp), log=lambda _: None)
     # The copy holds the target's other applets too; compare only the imported ones.
     copy["applets"] = [a for a in copy["applets"] if a["name"] in {x["name"] for x in applets}]
-    return compare(doc, copy)
+    notes: list[str] = []
+    diffs = compare(doc, copy, notes)
+    for n in notes:
+        log(f"NOTE: {n}")
+    return diffs
