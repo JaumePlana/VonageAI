@@ -11,6 +11,7 @@ import base64
 import html as html_lib
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -32,6 +33,15 @@ DC_NEXT_KEYS = ("NextApplet", "NextAppletFailure", "NextAppletInterfaceFailure",
 # The plan page (applications.asp) lists every plan; the second cell of the plan's row
 # links the initial applet, or says "WARNING initial applet not selected".
 INITIAL_APPLET = r'<tr id="{plan_id}">\s*<td\b[^>]*>.*?</td>\s*<td\b[^>]*>(.*?)</td>'
+# Fields on applet editor pages that are tokens, the plan's own ID or page navigation.
+FORM_NOISE = {
+    "__RequestVerificationToken", "__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION",
+    "__EVENTTARGET", "__EVENTARGUMENT", "dialnbr", "phonenum", "interactionPlanId", "interactionplanId",
+    "action", "application", "myapp", "name", "index", "notlogin", "validation", "addnewapplet", "hasapps",
+    "Acd.DialledNumber", "Acd.ApplicationName",
+}
+PAGE_MODEL = re.compile(r"JSON\.parse\(htmlDecode\('(.*?)'\)\)", re.S)
+MODEL_LOOKUPS = ("All", "Possible", "Formatted", "QueryKeys", "DataTypeOperators", "UnsavedChanges", "Show")
 LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
 # First cell of each plan row: "<name><br> Interaction plan type: <type> ...".
 PLAN_ROW = re.compile(r'<tr id="([^"]+)">\s*<td\b[^>]*>\s*(.*?)<br>\s*Interaction plan type:\s*([^<]*?)\s*<', re.S)
@@ -166,6 +176,66 @@ def extract_plans(html: str) -> list[dict]:
     return plans
 
 
+class _FormFields(HTMLParser):
+    """Collect what a browser would submit from a page's inputs, selects and textareas."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.fields: dict[str, list[str]] = {}
+        self._select: str | None = None
+        self._textarea: str | None = None
+        self._text: list[str] = []
+
+    def _add(self, name: str | None, value: str) -> None:
+        if name and name not in FORM_NOISE:
+            self.fields.setdefault(name, []).append(value)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "input":
+            kind = (a.get("type") or "text").lower()
+            if kind in ("submit", "button", "image", "reset", "file"):
+                return
+            if kind in ("checkbox", "radio") and "checked" not in a:
+                return
+            self._add(a.get("name"), a.get("value") or "")
+        elif tag == "select":
+            self._select = a.get("name")
+        elif tag == "option" and self._select and "selected" in a:
+            self._add(self._select, a.get("value") or "")
+        elif tag == "textarea":
+            self._textarea, self._text = a.get("name"), []
+
+    def handle_endtag(self, tag):
+        if tag == "select":
+            self._select = None
+        elif tag == "textarea" and self._textarea:
+            self._add(self._textarea, "".join(self._text).strip())
+            self._textarea = None
+
+    def handle_data(self, data):
+        if self._textarea:
+            self._text.append(data)
+
+
+def extract_form_values(html: str) -> dict:
+    """Settings of an applet editor page: its form fields plus its embedded JSON model.
+
+    Older pages fill their form from a model with script (Skill Tagger skills, Data Router
+    rules, next applets), so the fields alone miss them. Tokens, account-specific IDs and
+    lookup lists are left out.
+    """
+    parser = _FormFields()
+    parser.feed(html)
+    values: dict[str, Any] = {k: v[0] if len(v) == 1 else v for k, v in parser.fields.items()}
+    for raw in PAGE_MODEL.findall(html):
+        model = json.loads(html_lib.unescape(raw.replace("\\'", "'")))
+        if not isinstance(model, dict) or (len(model) > 20 and all(isinstance(v, str) for v in model.values())):
+            continue  # a bare lookup list, e.g. the account's data sources
+        values.update({k: v for k, v in model.items() if not k.startswith(MODEL_LOOKUPS)})
+    return values
+
+
 def encode_properties(props: dict) -> str:
     return base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
@@ -226,6 +296,10 @@ class PortalClient:
     def get_data_connector(self, applet: dict) -> dict:
         """Return extract_data_connector() for a Data Connector from list_applets()."""
         return extract_data_connector(self._request("GET", applet["configUrl"]).text)
+
+    def get_applet_form(self, applet: dict) -> dict:
+        """Editor page fields of an applet from list_applets(), for types without a parsed format."""
+        return extract_form_values(self._request("GET", applet["configUrl"]).text)
 
     def get_media_info(self, media_id: int) -> dict:
         """Return {"id", "name", "url"} for an uploaded applet audio file."""

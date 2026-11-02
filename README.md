@@ -48,6 +48,8 @@ vccflow export-plan   -a JPlana "DISH Web Services" # -> exports/JPlana/plans/DI
 vccflow initial-applet -a JPlana "zz Claude POC"   # show; add --set "<applet>" to change it
 vccflow import-plan   -a JPlana "exports/JPlana/plans/DISH Web Services" "zz Claude POC" --dry-run
 vccflow copy-plan     --from JPlana "DISH Web Services" "zz Claude POC" --dry-run   # both steps; --to <account> for another account
+vccflow compare-plans --from JPlana --to Demo29 "DISH Web Services" "POC Test"   # read-only: applets, paths, settings, skills, audio, IDs, data sources
+vccflow session       -a JPlana                    # is the portal login still valid?
 ```
 
 `import-plan` copies an export into an existing plan of `--account`: it checks everything first (`--dry-run` stops there), creates all applets, saves them with connections by name, uploads audio, sets the initial applet, then exports the target again and compares. On a failed write it deletes the applets it created. Announcer, Set Data Source, Data Connector and Menu applets are supported. `--skip-unsupported` leaves out applets that cannot be imported yet (e.g. ACD) and lists them; connections to them stay unset. Before writing, it also checks the data sources: those the plan reads but does not set itself (Set Data Source keys and Data Connector outputs count as set) should exist in the target account; the portal saves applets without checking. Missing ones are reported as warnings and the import goes ahead; `--require-data-sources` stops it before any write instead. Names are not case-sensitive (`LOG` and `Log` are the same data source). `copy-plan` runs the export and the import in one go; the export folder stays under `exports/` for reference.

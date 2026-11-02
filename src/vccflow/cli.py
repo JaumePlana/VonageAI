@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vccflow import export, har, importer, manager, poc
+from vccflow import compare, export, har, importer, manager, poc
 from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
@@ -165,6 +165,31 @@ def cmd_copy_plan(args: argparse.Namespace) -> None:
     _import(target, folder, target_id, target_name, args)
 
 
+def cmd_compare_plans(args: argparse.Namespace) -> None:
+    to_account = args.to_account or args.from_account
+    source, source_api = _portal(args, args.from_account)
+    target, target_api = _portal(args, to_account)
+    source_id, source_name = poc.resolve_plan(args.plan, source, source_api)
+    target_id, target_name = poc.resolve_plan(args.target, target, target_api)
+    if to_account == args.from_account and source_id == target_id:
+        raise PortalError("Source and target are the same plan")
+    print(f"Comparing '{source_name}' ({args.from_account}) with '{target_name}' ({to_account})")
+    report = compare.compare_plans(
+        source, source_id, source_name, target, target_id, target_name,
+        _plan_metadata(source, source_api, source_id), _plan_metadata(target, target_api, target_id),
+    )
+    print(compare.format_report(report))
+    found = len(report["differences"]) + len(report["problems"])
+    if found:
+        raise PortalError(f"{found} differences or problems found")
+
+
+def cmd_session(args: argparse.Namespace) -> None:
+    account = load_account(args.account, Path(args.config))
+    PortalClient(account).check_session()
+    print(f"Portal session for '{account.name}' is valid.")
+
+
 def cmd_get(args: argparse.Namespace) -> None:
     _print_json(_client(args).get(args.path))
 
@@ -279,6 +304,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stop before writing if the target account lacks data sources the plan reads "
                         "(default: warn and import anyway)")
     p.set_defaults(func=cmd_copy_plan)
+
+    p = sub.add_parser("compare-plans", help="compare two plans, also across accounts (portal, read-only)")
+    p.add_argument("plan", help="source plan ID or name")
+    p.add_argument("target", help="target plan ID or name")
+    p.add_argument("--from", dest="from_account", required=True, help="source account from accounts.toml")
+    p.add_argument("--to", dest="to_account", help="target account (default: the --from account)")
+    p.set_defaults(func=cmd_compare_plans)
+
+    with_account(sub.add_parser("session", help="check that the account's portal login is still valid")).set_defaults(
+        func=cmd_session)
 
     p = with_account(sub.add_parser("get", help="raw GET on any IPM path, for exploring the API"))
     p.add_argument("path", help="path under /ipm, e.g. mappings")
