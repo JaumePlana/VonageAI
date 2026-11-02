@@ -47,8 +47,8 @@ class FakePortal:
 
     def list_applets(self, plan_id):
         return {"name": "zz Claude POC", "applets": [
-            {"name": n, "guid": f"guid-{n}", "appletType": a["type"], "configUrl": f"x?myapp={n}"}
-            for n, a in self.applets.items()]}
+            {"id": 1000 + i, "name": n, "guid": f"guid-{n}", "appletType": a["type"], "configUrl": f"x?myapp={n}"}
+            for i, (n, a) in enumerate(self.applets.items())]}
 
     def create_applet(self, plan_id, applet_type, name):
         self.writes.append(("create", name))
@@ -148,7 +148,7 @@ def test_compare_ignores_line_endings_and_spots_differences():
 
 def with_menu():
     doc = plan_doc()
-    doc["applets"].append({"name": "MNU M", "type": "Menu", "settings": {}, "next": {"NextApplet": "ANN A"}})
+    doc["applets"].append({"name": "MNU M", "type": "ACD", "settings": {}, "next": {"NextApplet": "ANN A"}})
     doc["applets"][1]["next"] = {"NextApplet": "MNU M"}  # LOG B -> MNU M
     return doc
 
@@ -165,7 +165,7 @@ def test_drop_unsupported_unsets_connections_to_skipped_applets():
 def test_skip_unsupported_imports_the_rest(tmp_path, monkeypatch):
     write_plan(tmp_path, with_menu())
     portal = FakePortal()
-    with pytest.raises(PortalError, match="Menu is not supported"):
+    with pytest.raises(PortalError, match="ACD is not supported"):
         import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None)
     assert portal.writes == []
 
@@ -213,3 +213,56 @@ def test_compare_treats_letter_case_as_a_note():
     b["applets"][1]["settings"]["DataSources"][0]["Key"] = "Log"
     notes = []
     assert compare(a, b, notes) == [] and "letter case" in notes[0]
+
+
+def doc_with_menu():
+    doc = plan_doc()
+    doc["applets"].append({
+        "name": "MNU M", "type": "Menu",
+        "settings": {"AnnouncementType": "InternalFile", "Timeout": 10,
+                     "AnnouncementMedia": {"AppletMedia": {"Id": None}, "TextToSpeech": ""}},
+        "next": {"Choices.0": "LOG B", "Choices.*": "DC C", "TimeoutApplet": "LOG B", "FailureApplet": "DC C"},
+        "media": [{"property": "AnnouncementMedia", "file": "media/ANN A.wav", "name": "Menu prompt"}],
+    })
+    return doc
+
+
+def test_menu_connections_are_rebuilt_for_the_target(tmp_path, monkeypatch):
+    doc = doc_with_menu()
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: doc)
+    assert import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None) == []
+
+    assert portal.applets["MNU M"]["type"] == "Menu"
+    props = portal.applets["MNU M"]["props"]
+    assert props["Choices"] == {"0": "LOG B", "*": "DC C"}
+    assert props["TimeoutAppletName"] == "LOG B" and props["TimeoutAppletGuid"] == "guid-LOG B"
+    listed = {a["name"]: a for a in portal.list_applets(TARGET)["applets"]}
+    assert props["FailureAppletId"] == listed["DC C"]["id"] and props["FailureAppletGuid"] == "guid-DC C"
+    assert props["AnnouncementMedia"]["AppletMedia"]["Id"] == 42
+    assert ("upload", "MNU M", "Menu prompt.wav") in portal.writes
+    # Connection keys belong to the export format, not to the applet's properties.
+    assert not any(k.startswith("Choices.") or k in ("TimeoutApplet", "FailureApplet") for k in props)
+
+
+def test_menu_choice_to_an_applet_outside_the_plan_is_refused(tmp_path):
+    doc = doc_with_menu()
+    doc["applets"][-1]["next"]["Choices.1"] = "Nowhere"
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    with pytest.raises(PortalError, match="Choices.1 points to 'Nowhere'"):
+        import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None)
+    assert portal.writes == []
+
+
+def test_skipping_an_unsupported_applet_removes_it_from_menu_choices():
+    from vccflow.importer import drop_unsupported
+
+    doc = doc_with_menu()
+    doc["applets"].append({"name": "ACD Q", "type": "ACD", "settings": {}, "next": {}})
+    doc["applets"][-2]["next"]["Choices.2"] = "ACD Q"
+    kept, notes = drop_unsupported(doc)
+    menu = next(a for a in kept["applets"] if a["name"] == "MNU M")
+    assert "Choices.2" not in menu["next"] and "Choices.0" in menu["next"]
+    assert any("Choices.2" in n for n in notes)

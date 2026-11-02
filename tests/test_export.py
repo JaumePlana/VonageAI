@@ -123,3 +123,24 @@ def test_created_versus_used_data_sources():
     assert data_sources_created(soql) == {"Case|Status", "Case|Id"}
     reads_log = {"settings": {"Text": "$(LOG) $(Case|Origin)"}}
     assert data_sources_needed([sds, ws, sf, reads_log]) == {"Case Country", "JavascriptEngineUrl", "CallGuid"}
+
+
+def test_menu_connections_go_into_next():
+    menu = {"Choices": {"0": "DC Get Salesforce", "*": "ANN Test Claude", "9": ""},
+            "TimeoutAppletName": "LOG Audio Failed", "TimeoutAppletGuid": "g1",
+            "FailureAppletId": 164192310, "FailureAppletGuid": "g2", "AccountId": 56303,
+            "Text": "Hello", "AppletType": "Menu"}
+    settings, nxt = split_connections(menu, {164192310: "LOG Test Claude Failed"})
+    assert nxt == {"Choices.0": "DC Get Salesforce", "Choices.*": "ANN Test Claude",
+                   "TimeoutApplet": "LOG Audio Failed", "FailureApplet": "LOG Test Claude Failed"}
+    assert settings == {"Text": "Hello"}
+
+
+def test_menu_data_sources():
+    from vccflow.export import data_sources_used
+
+    dynamic = {"settings": {"AnnouncementDataSource": "ANN_Case", "IsDynamicVoice": True, "VoiceDataSource": "vendortype"}}
+    assert data_sources_used(dynamic) == {"ANN_Case", "vendortype"}
+    # VoiceDataSource only counts when the voice is dynamic.
+    fixed = {"settings": {"IsDynamicVoice": False, "VoiceDataSource": "vendortype"}}
+    assert data_sources_used(fixed) == set()

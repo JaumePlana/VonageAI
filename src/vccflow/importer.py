@@ -22,7 +22,7 @@ from vccflow.portal import MAX_MEDIA_BYTES, PortalClient, PortalError, data_conn
 
 DATA_CONNECTOR = "DataRetriever"
 # Applet types whose editor saves through Applet/Save (the React editor).
-EDITOR_TYPES = {"DataAnnouncer", "SetDataSource"}
+EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu"}
 
 
 def load_plan(plan_dir: Path) -> dict:
@@ -242,9 +242,19 @@ def import_plan(
                     media_id = portal.upload_media(target_plan_id, a["name"], path, filename)
                     _set_path(props, m["property"], media_id)
                     log(f"   uploaded {path.name} as '{filename}'")
+                if any(k.startswith("Choices.") for k in nxt):
+                    props["Choices"] = {}
                 for key, target in nxt.items():
-                    props[key] = target
-                    props[f"{key}Guid"] = by_name[target].get("guid")
+                    t = by_name[target]
+                    if key.startswith("Choices."):
+                        props["Choices"][key[len("Choices."):]] = target
+                    elif key == "TimeoutApplet":
+                        props["TimeoutAppletName"], props["TimeoutAppletGuid"] = target, t.get("guid")
+                    elif key == "FailureApplet":
+                        props["FailureAppletId"], props["FailureAppletGuid"] = t.get("id"), t.get("guid")
+                    else:
+                        props[key] = target
+                        props[f"{key}Guid"] = t.get("guid")
                 portal.save_applet(target_plan_id, a["name"], props)
             log(f"   {a['name']}")
 

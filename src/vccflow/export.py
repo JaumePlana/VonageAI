@@ -23,8 +23,11 @@ FORMAT = "vccflow.plan/1"
 # Applet properties that identify an applet in one account; rebuilt on import.
 ACCOUNT_SPECIFIC = {
     "DialledNumber", "EntityId", "AppletGuid", "AppletName", "DisplayName",
-    "Url", "ConfigurationUrl", "ApplicationType", "AppletType",
+    "Url", "ConfigurationUrl", "ApplicationType", "AppletType", "AccountId",
 }
+# Menu connections (exported into "next"): Choices {key: applet name}, the timeout
+# applet by name + GUID, and the failure applet by numeric ID + GUID (no name).
+MENU_CONNECTION_KEYS = {"Choices", "TimeoutAppletName", "FailureAppletId"}
 # Data Connector page-model keys that are lookup lists or derived values, not configuration.
 DC_NOT_CONFIG = {
     "DataProviders", "Actions", "MetabaseEntries", "PossibleNextApplets", "FormattedNextApplets",
@@ -43,10 +46,25 @@ def _is_next_key(key: str) -> bool:
     return key.startswith("NextApplet") and not key.endswith(("Guid", "Url"))
 
 
-def split_connections(props: dict) -> tuple[dict, dict]:
-    """Return (settings, next) where next maps NextApplet* properties to applet names."""
+def split_connections(props: dict, names_by_id: dict | None = None) -> tuple[dict, dict]:
+    """Return (settings, next) where next maps connection keys to applet names.
+
+    NextApplet* properties keep their names; a Menu's connections become
+    "Choices.<key>", "TimeoutApplet" and "FailureApplet" (names_by_id maps the
+    failure applet's numeric ID to its name).
+    """
     settings, nxt = {}, {}
+    if isinstance(props.get("Choices"), dict):
+        nxt.update({f"Choices.{k}": v for k, v in props["Choices"].items() if v})
+    if props.get("TimeoutAppletName"):
+        nxt["TimeoutApplet"] = props["TimeoutAppletName"]
+    if props.get("FailureAppletId") and names_by_id:
+        name = names_by_id.get(int(props["FailureAppletId"]))
+        if name:
+            nxt["FailureApplet"] = name
     for k, v in props.items():
+        if k in MENU_CONNECTION_KEYS:
+            continue
         if _is_next_key(k):
             if v:
                 nxt[k] = v
@@ -125,8 +143,11 @@ def data_sources_used(applet: dict) -> set[str]:
     found = set()
     for text in _strings(s):
         found.update(PLACEHOLDER.findall(text))
-    if s.get("DataSource"):
-        found.add(s["DataSource"])
+    for key in ("DataSource", "AnnouncementDataSource"):
+        if s.get(key):
+            found.add(s[key])
+    if s.get("IsDynamicVoice") and s.get("VoiceDataSource"):  # Menu voice taken from a data source
+        found.add(s["VoiceDataSource"])
     if (s.get("CrmRetrievalViewModel") or {}).get("MatchDataSource"):
         found.add(s["CrmRetrievalViewModel"]["MatchDataSource"])
     for p in (s.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
@@ -154,7 +175,8 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]+', "_", name).strip() or "applet"
 
 
-def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: Path) -> dict:
+def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: Path,
+                  names_by_id: dict | None = None) -> dict:
     entry: dict[str, Any] = {"name": applet["name"], "kind": applet["appletType"]}
     config_url = applet.get("configUrl") or ""
 
@@ -174,7 +196,7 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
 
     props = portal.get_applet_state(plan_id, applet)["appletProperties"]
     entry["type"] = props.get("AppletType")
-    settings, nxt = split_connections(props)
+    settings, nxt = split_connections(props, names_by_id)
     entry["settings"] = settings
     entry["next"] = nxt
 
@@ -205,12 +227,13 @@ def export_plan(
     media_dir = out_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     listing = portal.list_applets(plan_id)
+    names_by_id = {a["id"]: a["name"] for a in listing.get("applets", []) if a.get("id")}
 
     applets = []
     for a in sorted(listing.get("applets", []), key=lambda x: x["name"].lower()):
         log(f"  {a['name']} ({a['appletType']})")
         try:
-            applets.append(export_applet(portal, plan_id, a, media_dir))
+            applets.append(export_applet(portal, plan_id, a, media_dir, names_by_id))
         except PortalError as e:
             log(f"    WARNING: not exported: {e}")
             applets.append({"name": a["name"], "kind": a["appletType"], "unsupported": str(e)})
