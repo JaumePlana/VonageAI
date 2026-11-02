@@ -2,25 +2,25 @@
 
 Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](README.md).
 
-## Resume here (end of 2026-10-29)
+## Resume here (2026-11-02)
 
-**Where we are:** export, import and `copy-plan` work within one account (JPlana). Last commit `9ef8c66`, pushed. 41 tests pass.
+**Where we are:** export, import and `copy-plan` work within an account and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Details are in the log below.
 
-**State in VCC (JPlana):**
-- "zz Claude POC" (`da7310e5-…`) holds a full copy of "DISH Web Services" (11 applets, initial applet ANN Audio). Delete those applets before copying into it again (the import refuses existing names).
-- Portal sessions expire after a while: if a command says so, run `vccflow login -a JPlana`.
+**State in VCC:**
+- Demo29 "POC Test" (`b918444e-…`) holds a full copy of JPlana "DISH Web Services" (15 applets). Empty it before copying into it again: the import refuses existing names.
+- 7 data sources the plan reads do not exist in Demo29 (the import warns and names the applets).
+- Portal logins expire: if a command says so, run `vccflow login -a <account>`.
 
-**Next steps, in order:**
-1. **Copy between two accounts** (Test → Test, never PROD first): `vccflow copy-plan "<plan>" "<plan>" --from A --to B --dry-run`, then for real. Needs in B: the plan created and empty, `allow_portal_writes = true`, a portal login, API credentials (for plan names). Only JPlana has writes enabled today.
-2. **Pre-checks for the target account** that the import does not do yet: data sources used by the plan (`requires.dataSources` in plan.json), Salesforce/Web Service connections, and any groups/skills/transfer strings once other applet types are supported.
-3. **More applet types:** only Announcer, Set Data Source and Data Connector are supported. Each new type needs a HAR of creating and saving it (Architect types are listed in the create form: ACD, Menu, Router, Collect Input, …).
-4. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
-5. Later: DrawIO/Visio → `plan.json` → `import-plan`.
+**Next steps:**
+1. More applet types: each needs a HAR of creating and saving it (e.g. ACD, Router, Data Router, Collect Input). `--skip-unsupported` copies the rest meanwhile.
+2. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
+3. Test → PROD only after that; `allow_portal_writes` must be set per account.
+4. Later: DrawIO/Visio → `plan.json` → `import-plan`.
 
 **Open items for the user:**
-- Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors (printed in an earlier session).
-- `exports/` holds the HAR recordings and plan exports with credentials and cookies: git-ignored, keep private, delete the raw `.har` files when no longer needed.
-- Optional: explore the portal's built-in "Copy To" (`docopy.asp`).
+- Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors (printed in an earlier session). The copy to Demo29 carries them too.
+- Where do `Contact Language`, `Contact Role`, `CustomerReference` and `JavascriptEngineUrl` come from? JPlana does not list them either.
+- `exports/` holds HARs and exports with credentials and cookies: git-ignored, keep private.
 
 ## Status (2026-10-28)
 
@@ -95,5 +95,5 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
   - DISH Web Services reads 4 data sources nothing in the plan sets and JPlana does not list either: Contact Language, Contact Role, CustomerReference, JavascriptEngineUrl (asked the user where they come from). Not yet counted as existing: data sources set on plans/mappings/destinations (`interactionProperties`).
 - [x] **Media Channels API for destinations** (2026-10-30, suggested by the user; documented by Vonage: docs-vcc.atlassian.net, "Media Channels API"): `GET https://<region>.api.cc.vonage.com/media-channels/<channel>/addresses` for pstn, api, webchat, sms, whatsapp, email; Accept `application/vnd.newvoicemedia.v2+json`; scope **`admin:read`** (writes: `admin:write`), which the client-credentials tokens of JPlana and Demo29 get. Returns `{addresses: [{id, address: {name, description, dataSources, serviceNameReporting}, profileId, mapping, modifiedTime, modifiedBy}]}`; a channel the account lacks answers 403 "Feature not enabled". `list-destinations` uses it by default (`media_channels.py`); `--source manager` uses the Interaction Manager API, with the portal-login fallback. Counts match: JPlana 3 PSTN / 18 API, Demo29 3 PSTN / 9 API.
 - [x] Menu applet code and unit tests (from `exports/HAR/menu.har`): same React editor and `Applet/Save` as Announcers, created with `appletType=Menu`. Connections: `Choices` {key: applet name}, `TimeoutAppletName` + GUID, `FailureAppletId` (numeric, from the applet list) + GUID. The export stores them in `next` as `Choices.<key>`, `TimeoutApplet`, `FailureApplet` (by name); the import rebuilds them with the target's IDs and GUIDs. Data sources read: `AnnouncementDataSource`, and `VoiceDataSource` when `IsDynamicVoice`.
-- [ ] **Live Menu test still to do** (needs fresh portal logins): re-export DISH Web Services, copy into a scratch plan and check the read-back; watch for `Timeout`/`TimeoutCount` coming back as string vs number.
+- [x] **Live Menu test passed** (2026-11-02): `copy-plan --from JPlana --to Demo29 "DISH Web Services" "POC Test"` copied all 15 applets, 2 WAVs and the initial applet. Read-back matches (one case-only note: `VoiceCall|Id`). "MNU Example" checked directly: 11 choices, timeout applet, failure applet (new ID and GUID resolve to the same applet by name), Timeout and TimeoutCount identical. That Menu is text-to-speech with a fixed voice, so a Menu with uploaded audio or a dynamic voice is covered by unit tests only.
 - [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.
