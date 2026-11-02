@@ -69,53 +69,19 @@ def _setting_findings(applet: str, a: Any, b: Any, report: dict, what: str = "se
             report["differences"].append(f"'{applet}' {what} {path}: source {_show(x)} | target {_show(y)}")
 
 
-def broken_connection_ids(applet: str, props: dict, applets: list[dict]) -> list[str]:
-    """Connection GUIDs and IDs that do not point to the applet named, inside this plan."""
-    by_guid = {a.get("guid"): a["name"] for a in applets}
-    ids = {a.get("id") for a in applets}
-    problems = []
-    for k, v in props.items():
-        if not k.endswith("Guid") or k == "AppletGuid" or not v:
-            continue
-        base = k[:-4]
-        named = props.get(base) or props.get(f"{base}Name")
-        if v not in by_guid:
-            suffix = f" (should be '{named}')" if named else ""
-            problems.append(f"'{applet}' {k} points to a GUID that is not in this plan{suffix}")
-        elif isinstance(named, str) and named and named != by_guid[v]:
-            problems.append(f"'{applet}' {base} says '{named}' but its GUID is '{by_guid[v]}'")
-    failure = props.get("FailureAppletId")
-    if failure:
-        try:
-            known = int(failure) in ids
-        except (TypeError, ValueError):
-            known = False
-        if not known:
-            problems.append(f"'{applet}' FailureAppletId {failure} is not in this plan")
-    return problems
-
-
 def read_plan(portal: PortalClient, plan_id: str, plan_name: str, metadata: dict | None = None) -> dict:
-    """Export a plan to a temporary folder, adding what the comparison needs.
-
-    Adds to each applet: "form" (editor page fields, for types that cannot be exported)
-    and media "sha256". Adds to the document: "brokenIds".
-    """
+    """Export a plan from VCC to a temporary folder and return the document."""
     with tempfile.TemporaryDirectory() as tmp:
-        doc = export.export_plan(portal, plan_id, plan_name, Path(tmp), metadata=metadata, log=lambda _: None)
-        for a in doc["applets"]:
-            for m in a.get("media", []):
-                m["sha256"] = hashlib.sha256((Path(tmp) / m["file"]).read_bytes()).hexdigest()
-    listed = portal.list_applets(plan_id).get("applets", [])
-    by_name = {a["name"]: a for a in listed}
-    doc["brokenIds"] = []
+        return export.export_plan(portal, plan_id, plan_name, Path(tmp), metadata=metadata, log=lambda _: None)
+
+
+def load_export(folder: Path) -> dict:
+    """Read a saved export. Exports made before audio hashes existed get them from their files."""
+    doc = importer.load_plan(folder)
     for a in doc["applets"]:
-        applet = by_name.get(a["name"])
-        if a.get("unsupported"):
-            a["form"] = portal.get_applet_form(applet) if applet else {}
-        elif a.get("type") != importer.DATA_CONNECTOR and applet:
-            props = portal.get_applet_state(plan_id, applet)["appletProperties"]
-            doc["brokenIds"] += broken_connection_ids(a["name"], props, listed)
+        for m in a.get("media", []):
+            if "sha256" not in m and (folder / m["file"]).exists():
+                m["sha256"] = hashlib.sha256((folder / m["file"]).read_bytes()).hexdigest()
     return doc
 
 
@@ -143,9 +109,13 @@ def compare_docs(source: dict, target: dict) -> dict:
                 report["differences"].append(f"'{name}' path {key} is missing in the source (target goes to '{bn[key]}')")
             elif an[key] != bn[key]:
                 report["differences"].append(f"'{name}' path {key} is different: source '{an[key]}' | target '{bn[key]}'")
-        if "form" in a or "form" in b:
-            report["notes"].append(f"'{name}' ({a.get('kind')}) compared through its editor page fields only")
-            _setting_findings(name, a.get("form"), b.get("form"), report, "field")
+        if a.get("unsupported") or b.get("unsupported"):
+            if "form" in a and "form" in b:
+                report["notes"].append(f"'{name}' ({a.get('kind')}) compared through its editor page fields only")
+                _setting_findings(name, a["form"], b["form"], report, "field")
+            else:
+                report["notes"].append(f"'{name}' ({a.get('kind')}) settings not compared: "
+                                       "its editor page fields are not in the export (made before they were saved)")
         else:
             _setting_findings(name, a.get("settings"), b.get("settings"), report)
         am = {m["property"]: m for m in a.get("media", [])}
@@ -156,7 +126,7 @@ def compare_docs(source: dict, target: dict) -> dict:
                 report["differences"].append(f"'{name}' audio {prop} is missing in the {side}")
             elif am[prop].get("name") != bm[prop].get("name"):
                 report["differences"].append(f"'{name}' audio name: source '{am[prop].get('name')}' | target '{bm[prop].get('name')}'")
-            elif am[prop].get("sha256") != bm[prop].get("sha256"):
+            elif am[prop].get("sha256") and bm[prop].get("sha256") and am[prop]["sha256"] != bm[prop]["sha256"]:
                 report["differences"].append(f"'{name}' audio '{am[prop].get('name')}' has different content")
 
     for key, label in (("initialApplet", "initial applet"), ("reportingGroupName", "reporting group")):
@@ -170,7 +140,7 @@ def compare_docs(source: dict, target: dict) -> dict:
             for key, to in a.get("next", {}).items():
                 if to not in names:
                     report["problems"].append(f"{side}: '{a['name']}' path {key} goes to '{to}', which is not in the plan")
-        report["problems"] += [f"{side}: {p}" for p in doc.get("brokenIds", [])]
+            report["problems"] += [f"{side}: {p}" for p in a.get("connectionProblems", [])]
     return report
 
 
@@ -188,6 +158,13 @@ def compare_plans(source_portal: PortalClient, source_id: str, source_name: str,
         missing, notes = importer.check_data_sources(readable, existing)
         report["problems"] += missing
         report["notes"] += notes
+    return report
+
+
+def compare_exports(source_dir: Path, target_dir: Path) -> dict:
+    """Compare two saved exports. The account's data source list is not in an export, so it is not checked."""
+    report = compare_docs(load_export(source_dir), load_export(target_dir))
+    report["notes"].append("compared saved exports: data sources in the target account not checked")
     return report
 
 

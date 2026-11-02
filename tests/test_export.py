@@ -92,6 +92,7 @@ def test_export_plan_writes_portable_document(tmp_path):
 
     audio = by_name["ANN Audio"]
     assert audio["type"] == "DataAnnouncer"
+    assert audio["media"][0].pop("sha256")
     assert audio["media"] == [{"property": "AnnouncementMedia", "file": "media/ANN Audio.wav", "name": "Ringing"}]
     assert audio["settings"]["AnnouncementMedia"]["AppletMedia"]["Id"] is None
     assert (tmp_path / "media" / "ANN Audio.wav").read_bytes() == b"RIFF....WAVE"
@@ -144,3 +145,34 @@ def test_menu_data_sources():
     # VoiceDataSource only counts when the voice is dynamic.
     fixed = {"settings": {"IsDynamicVoice": False, "VoiceDataSource": "vendortype"}}
     assert data_sources_used(fixed) == set()
+
+
+def test_applets_that_cannot_be_exported_keep_their_page_fields(tmp_path):
+    from vccflow.portal import PortalError
+
+    class Portal(FakePortal):
+        states = {}
+
+        def list_applets(self, plan_id):
+            return {"applets": [{"id": 1, "guid": "g", "name": "ST B", "appletType": "Skill Tagger", "configUrl": "Skill?x"}]}
+
+        def get_applet_state(self, plan_id, applet):
+            raise PortalError("no initialState")
+
+        def get_applet_form(self, applet):
+            return {"Skills": [{"Name": "FR"}]}
+
+    doc = export_plan(Portal(), PLAN_ID, "P", tmp_path, log=lambda _: None)
+    assert doc["applets"][0]["form"] == {"Skills": [{"Name": "FR"}]} and doc["applets"][0]["unsupported"]
+    assert json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))["applets"][0]["form"]
+
+
+def test_export_records_connection_ids_that_do_not_resolve(tmp_path):
+    class Portal(FakePortal):
+        states = {"ANN A": {"AppletType": "DataAnnouncer", "NextAppletSuccess": "ANN A", "NextAppletSuccessGuid": "elsewhere"}}
+
+        def list_applets(self, plan_id):
+            return {"applets": [{"id": 1, "guid": "g1", "name": "ANN A", "appletType": "Announcer", "configUrl": "Applet?x"}]}
+
+    doc = export_plan(Portal(), PLAN_ID, "P", tmp_path, log=lambda _: None)
+    assert "not in this plan" in doc["applets"][0]["connectionProblems"][0]

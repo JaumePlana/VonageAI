@@ -184,6 +184,15 @@ def cmd_compare_plans(args: argparse.Namespace) -> None:
         raise PortalError(f"{found} differences or problems found")
 
 
+def cmd_compare_exports(args: argparse.Namespace) -> None:
+    print(f"Comparing saved exports {args.source} and {args.target}")
+    report = compare.compare_exports(Path(args.source), Path(args.target))
+    print(compare.format_report(report))
+    found = len(report["differences"]) + len(report["problems"])
+    if found:
+        raise PortalError(f"{found} differences or problems found")
+
+
 def cmd_session(args: argparse.Namespace) -> None:
     account = load_account(args.account, Path(args.config))
     PortalClient(account).check_session()
@@ -311,6 +320,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from", dest="from_account", required=True, help="source account from accounts.toml")
     p.add_argument("--to", dest="to_account", help="target account (default: the --from account)")
     p.set_defaults(func=cmd_compare_plans)
+
+    p = sub.add_parser("compare-exports", help="compare two saved export folders (offline)")
+    p.add_argument("source", help="export folder with plan.json")
+    p.add_argument("target", help="export folder with plan.json")
+    p.set_defaults(func=cmd_compare_exports)
 
     with_account(sub.add_parser("session", help="check that the account's portal login is still valid")).set_defaults(
         func=cmd_session)

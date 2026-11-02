@@ -1,6 +1,8 @@
 import copy
+import json
 
-from vccflow.compare import broken_connection_ids, compare_docs, format_report
+from vccflow.compare import compare_docs, compare_exports, format_report
+from vccflow.export import broken_connection_ids
 from vccflow.portal import extract_form_values
 
 
@@ -110,3 +112,36 @@ def test_form_values_include_the_page_model_without_lookups():
     <textarea name="T"> hi </textarea></form>
     <script>m.loadCrmModel(JSON.parse(htmlDecode('{&quot;Skills&quot;:[{&quot;Name&quot;:&quot;FR&quot;}],&quot;AllSkills&quot;:[1],&quot;PossibleNextApplets&quot;:[2],&quot;NextApplet&quot;:&quot;B&quot;}')));</script>"""
     assert extract_form_values(html) == {"On": "x", "Q": "2", "T": "hi", "Skills": [{"Name": "FR"}], "NextApplet": "B"}
+
+
+def save(folder, doc):
+    folder.mkdir()
+    (folder / "plan.json").write_text(json.dumps({"format": "vccflow.plan/1", **doc}), encoding="utf-8")
+
+
+def test_compare_exports_finds_differences_including_skills(tmp_path):
+    a, b = plan(), plan()
+    by_name(b, "ST B")["form"]["Skills"] = [{"Name": "EN"}]
+    save(tmp_path / "a", a)
+    save(tmp_path / "b", b)
+    report = compare_exports(tmp_path / "a", tmp_path / "b")
+    assert any("'ST B' field Skills" in d for d in report["differences"])
+    assert any("data sources in the target account not checked" in n for n in report["notes"])
+
+
+def test_older_exports_without_page_fields_or_hashes_are_noted_not_flagged(tmp_path):
+    a, b = plan(), plan()
+    for doc in (a, b):
+        del by_name(doc, "ST B")["form"]
+        del by_name(doc, "ANN A")["media"][0]["sha256"]
+        by_name(doc, "ANN A")["media"][0]["file"] = "media/x.wav"
+    save(tmp_path / "a", a)
+    save(tmp_path / "b", b)
+    (tmp_path / "a" / "media").mkdir()
+    (tmp_path / "a" / "media" / "x.wav").write_bytes(b"one")
+    (tmp_path / "b" / "media").mkdir()
+    (tmp_path / "b" / "media" / "x.wav").write_bytes(b"two")
+    report = compare_exports(tmp_path / "a", tmp_path / "b")
+    assert any("settings not compared" in n for n in report["notes"])
+    # Hashes come from the files, so the audio difference is still found.
+    assert any("different content" in d for d in report["differences"])

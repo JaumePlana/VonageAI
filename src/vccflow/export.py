@@ -10,6 +10,7 @@ Layout: <out_dir>/plan.json and <out_dir>/media/<applet name>.<ext>
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -175,8 +176,34 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]+', "_", name).strip() or "applet"
 
 
+def broken_connection_ids(applet: str, props: dict, applets: list[dict]) -> list[str]:
+    """Connection GUIDs and IDs that do not point to the applet named, inside this plan."""
+    by_guid = {a.get("guid"): a["name"] for a in applets}
+    ids = {a.get("id") for a in applets}
+    problems = []
+    for k, v in props.items():
+        if not k.endswith("Guid") or k == "AppletGuid" or not v:
+            continue
+        base = k[:-4]
+        named = props.get(base) or props.get(f"{base}Name")
+        if v not in by_guid:
+            suffix = f" (should be '{named}')" if named else ""
+            problems.append(f"'{applet}' {k} points to a GUID that is not in this plan{suffix}")
+        elif isinstance(named, str) and named and named != by_guid[v]:
+            problems.append(f"'{applet}' {base} says '{named}' but its GUID is '{by_guid[v]}'")
+    failure = props.get("FailureAppletId")
+    if failure:
+        try:
+            known = int(failure) in ids
+        except (TypeError, ValueError):
+            known = False
+        if not known:
+            problems.append(f"'{applet}' FailureAppletId {failure} is not in this plan")
+    return problems
+
+
 def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: Path,
-                  names_by_id: dict | None = None) -> dict:
+                  listed: list[dict] | None = None) -> dict:
     entry: dict[str, Any] = {"name": applet["name"], "kind": applet["appletType"]}
     config_url = applet.get("configUrl") or ""
 
@@ -196,7 +223,11 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
 
     props = portal.get_applet_state(plan_id, applet)["appletProperties"]
     entry["type"] = props.get("AppletType")
-    settings, nxt = split_connections(props, names_by_id)
+    listed = listed or []
+    settings, nxt = split_connections(props, {a["id"]: a["name"] for a in listed if a.get("id")})
+    problems = broken_connection_ids(applet["name"], props, listed) if listed else []
+    if problems:
+        entry["connectionProblems"] = problems
     entry["settings"] = settings
     entry["next"] = nxt
 
@@ -207,8 +238,10 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         ext = Path(info.get("url") or "").suffix or ".wav"
         stem = _safe_filename(applet["name"] if len(refs) == 1 else f"{applet['name']} {path}")
         filename = f"{stem}{ext}"
-        (media_dir / filename).write_bytes(portal.download_media(info["url"]))
-        media.append({"property": path, "file": f"media/{filename}", "name": info.get("name")})
+        content = portal.download_media(info["url"])
+        (media_dir / filename).write_bytes(content)
+        media.append({"property": path, "file": f"media/{filename}", "name": info.get("name"),
+                      "sha256": hashlib.sha256(content).hexdigest()})
         _clear_media_id(settings, path)
     if media:
         entry["media"] = media
@@ -227,16 +260,21 @@ def export_plan(
     media_dir = out_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     listing = portal.list_applets(plan_id)
-    names_by_id = {a["id"]: a["name"] for a in listing.get("applets", []) if a.get("id")}
+    listed = listing.get("applets", [])
 
     applets = []
     for a in sorted(listing.get("applets", []), key=lambda x: x["name"].lower()):
         log(f"  {a['name']} ({a['appletType']})")
         try:
-            applets.append(export_applet(portal, plan_id, a, media_dir, names_by_id))
+            applets.append(export_applet(portal, plan_id, a, media_dir, listed))
         except PortalError as e:
-            log(f"    WARNING: not exported: {e}")
-            applets.append({"name": a["name"], "kind": a["appletType"], "unsupported": str(e)})
+            log(f"    NOTE: cannot be imported yet, saving its editor page fields: {e}")
+            entry = {"name": a["name"], "kind": a["appletType"], "unsupported": str(e)}
+            try:
+                entry["form"] = portal.get_applet_form(a)  # still lets exports be compared
+            except PortalError as form_error:
+                log(f"    WARNING: could not read its editor page: {form_error}")
+            applets.append(entry)
 
     names = {a["name"] for a in applets}
     for a in applets:

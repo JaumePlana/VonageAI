@@ -49,6 +49,7 @@ vccflow initial-applet -a JPlana "zz Claude POC"   # show; add --set "<applet>" 
 vccflow import-plan   -a JPlana "exports/JPlana/plans/DISH Web Services" "zz Claude POC" --dry-run
 vccflow copy-plan     --from JPlana "DISH Web Services" "zz Claude POC" --dry-run   # both steps; --to <account> for another account
 vccflow compare-plans --from JPlana --to Demo29 "DISH Web Services" "POC Test"   # read-only: applets, paths, settings, skills, audio, IDs, data sources
+vccflow compare-exports "exports/old" "exports/new"   # offline: two saved exports (use export-plan --out to keep a copy)
 vccflow session       -a JPlana                    # is the portal login still valid?
 ```
 
