@@ -105,7 +105,9 @@ def test_set_initial_applet_posts_the_form():
     session = MagicMock()
     resp = MagicMock(status_code=301, is_redirect=True, headers={"Location": "/CallCentre/apps/applications.asp"})
     session.request.return_value = resp
-    PortalClient(Account(name="t", region="emea", allow_portal_writes=True), session=session).set_initial_applet(PLAN_ID, "ANN Audio")
+    session.get.return_value = MagicMock(status_code=200, text="var user = { account: 'Acme' };")
+    account = Account(name="t", region="emea", allow_portal_writes=True, portal_account="Acme")
+    PortalClient(account, session=session).set_initial_applet(PLAN_ID, "ANN Audio")
     _, kwargs = session.request.call_args
     assert session.request.call_args[0][1].endswith("InteractionArchitect/SetInitialApplet")
     assert kwargs["data"] == {"interactionPlanId": PLAN_ID, "initialApplet": "ANN Audio", "Update": "Set"}

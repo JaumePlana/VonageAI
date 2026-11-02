@@ -12,7 +12,7 @@ PLAN_ID = "e9d0c8ab-741a-4d86-bd98-27f793d2a72e"
 
 
 def account(writes=True):
-    return Account(name="test", region="emea", allow_portal_writes=writes)
+    return Account(name="test", region="emea", allow_portal_writes=writes, portal_account="Acme")
 
 
 def response(status=200, *, json_body=None, text="", location=None):
@@ -28,6 +28,7 @@ def response(status=200, *, json_body=None, text="", location=None):
 def portal_with(*responses, writes=True):
     session = MagicMock()
     session.request.side_effect = list(responses)
+    session.get.return_value = MagicMock(status_code=200, text="var user = { account: 'Acme' };")
     return PortalClient(account(writes), session=session), session
 
 

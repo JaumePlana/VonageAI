@@ -11,6 +11,7 @@ import base64
 import html as html_lib
 import json
 import re
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,8 @@ FORM_NOISE = {
 }
 PAGE_MODEL = re.compile(r"JSON\.parse\(htmlDecode\('(.*?)'\)\)", re.S)
 MODEL_LOOKUPS = ("All", "Possible", "Formatted", "QueryKeys", "DataTypeOperators", "UnsavedChanges", "Show")
+SIGNED_IN_USER = re.compile(r"var\s+user\s*=\s*\{(.*?)\};", re.S)
+SIGNED_IN_ACCOUNT = re.compile(r"\baccount\s*:\s*'([^']*)'")
 LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
 # First cell of each plan row: "<name><br> Interaction plan type: <type> ...".
 PLAN_ROW = re.compile(r'<tr id="([^"]+)">\s*<td\b[^>]*>\s*(.*?)<br>\s*Interaction plan type:\s*([^<]*?)\s*<', re.S)
@@ -53,6 +56,10 @@ class PortalError(Exception):
 
 class SessionExpired(PortalError):
     pass
+
+
+class WrongAccount(PortalError):
+    """The portal login is signed in to another VCC account than the one configured."""
 
 
 def session_file(account: Account) -> Path:
@@ -236,6 +243,25 @@ def extract_form_values(html: str) -> dict:
     return values
 
 
+def extract_signed_in_account(html: str) -> str:
+    """Name of the VCC account a portal page is signed in to (var user = {account: '...'})."""
+    user = SIGNED_IN_USER.search(html)
+    name = SIGNED_IN_ACCOUNT.search(user.group(1)) if user else None
+    if not name:
+        raise PortalError("Cannot tell which account the portal is signed in to; the page format may have changed")
+    return html_lib.unescape(name.group(1))
+
+
+def check_portal_account(account: Account, signed_in: str) -> None:
+    """Refuse a login signed in to another account than the configured portal_account."""
+    if account.portal_account and signed_in.casefold() != account.portal_account.casefold():
+        raise WrongAccount(
+            f"The portal login for '{account.name}' is signed in to '{signed_in}', "
+            f"but portal_account is '{account.portal_account}'. "
+            f"Run: vccflow login -a {account.name} and sign in to '{account.portal_account}'"
+        )
+
+
 def encode_properties(props: dict) -> str:
     return base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
@@ -245,10 +271,32 @@ class PortalClient:
         self.account = account
         self.base = f"{account.portal_url}/apps"
         self.session = session or load_session(account)
+        self._account_checked = False
 
     # --- transport ---
 
+    def signed_in_account(self) -> str:
+        """Name of the VCC account this login is signed in to, from the portal page."""
+        resp = self.session.get(f"{self.account.portal_url}/portal", allow_redirects=False, timeout=60)
+        if resp.status_code != 200:
+            raise SessionExpired(
+                f"Portal session for '{self.account.name}' has expired. Run: vccflow login -a {self.account.name}"
+            )
+        return extract_signed_in_account(resp.text)
+
+    def _check_account(self) -> None:
+        """Before the first call: make sure the login belongs to the configured account."""
+        if self._account_checked:
+            return
+        self._account_checked = True
+        if self.account.portal_account:
+            check_portal_account(self.account, self.signed_in_account())
+        else:
+            print(f"WARNING: no portal_account set for '{self.account.name}': "
+                  "not checking which account the login is signed in to.", file=sys.stderr)
+
     def _request(self, method: str, path: str, *, expect_redirect: bool = False, **kwargs) -> requests.Response:
+        self._check_account()
         url = f"{self.base}/{path}"
         headers = {"Origin": self.account.portal_url.rsplit("/CallCentre", 1)[0], **kwargs.pop("headers", {})}
         resp = self.session.request(method, url, headers=headers, allow_redirects=False, timeout=60, **kwargs)
@@ -272,6 +320,11 @@ class PortalClient:
             raise PortalError(f"POST {path}: response is not JSON ({resp.text[:200]!r})") from e
 
     def _require_writes(self) -> None:
+        if self.account.allow_portal_writes and not self.account.portal_account:
+            raise PortalError(
+                f"Writes need portal_account for '{self.account.name}', to be sure which account is written to. "
+                f"Run: vccflow session -a {self.account.name} to see the account's name, and set it in accounts.toml."
+            )
         if not self.account.allow_portal_writes:
             raise PortalError(
                 f"Writes are disabled for '{self.account.name}'. "

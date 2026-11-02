@@ -15,7 +15,7 @@ from vccflow.config import ConfigError, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
 from vccflow.manager import ManagerClient, ManagerError
 from vccflow.media_channels import MediaChannelsClient, MediaChannelsError
-from vccflow.portal import PortalClient, PortalError
+from vccflow.portal import PortalClient, PortalError, WrongAccount, check_portal_account
 from vccflow.portal_token import PortalTokenProvider
 
 
@@ -195,8 +195,10 @@ def cmd_compare_exports(args: argparse.Namespace) -> None:
 
 def cmd_session(args: argparse.Namespace) -> None:
     account = load_account(args.account, Path(args.config))
-    PortalClient(account).check_session()
-    print(f"Portal session for '{account.name}' is valid.")
+    signed_in = PortalClient(account).signed_in_account()
+    check_portal_account(account, signed_in)
+    note = "" if account.portal_account else " (no portal_account set: not checked)"
+    print(f"Portal session for '{account.name}' is valid: logged in to '{signed_in}'{note}.")
 
 
 def cmd_get(args: argparse.Namespace) -> None:
@@ -222,8 +224,16 @@ def cmd_login(args: argparse.Namespace) -> None:
 
     account = load_account(args.account, Path(args.config))
     path = login(account, browser_channel=args.browser)
-    PortalClient(account).check_session()
-    print(f"Logged in. Session saved to {path}")
+    signed_in = PortalClient(account).signed_in_account()
+    try:
+        check_portal_account(account, signed_in)
+    except WrongAccount:
+        Path(path).unlink()  # never keep a login to the wrong account under this name
+        raise
+    print(f"You have been logged in to '{signed_in}'. Session saved to {path}")
+    if not account.portal_account:
+        print(f"Add this to [accounts.{account.name}] in accounts.toml to check it from now on, if it is the right account:\n"
+              f'portal_account = "{signed_in}"')
 
 
 def cmd_applets(args: argparse.Namespace) -> None:

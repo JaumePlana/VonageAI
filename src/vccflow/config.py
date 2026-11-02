@@ -23,6 +23,8 @@ class Account:
     client_secret: str | None = None
     # Portal writes (create/save/delete applets) must be enabled per account.
     allow_portal_writes: bool = False
+    # Name of the VCC account the portal login must be signed in to (see portal.py).
+    portal_account: str | None = None
 
     @property
     def token_url(self) -> str:
@@ -91,4 +93,5 @@ def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Ac
         client_id=secret("client_id_env"),
         client_secret=secret("client_secret_env"),
         allow_portal_writes=bool(entry.get("allow_portal_writes", False)),
+        portal_account=entry.get("portal_account"),
     )

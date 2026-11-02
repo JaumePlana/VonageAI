@@ -57,7 +57,7 @@ vccflow session       -a JPlana                    # is the portal login still v
 
 The export drops IDs that belong to one account, keeps connections by applet name, records the initial applet, and downloads uploaded audio files. Data Connector definitions are exported as-is and can contain credentials.
 
-Writes only run for accounts with `allow_portal_writes = true` in `accounts.toml`. Commands check that the portal session and the API see the same plan, so a session from the wrong account is refused.
+Writes only run for accounts with `allow_portal_writes = true` and `portal_account` in `accounts.toml`. `portal_account` is the VCC account's name: `vccflow login` tells you which account you were logged in to, and refuses and removes a login to any other account. Every portal command repeats that check. Commands also check that the portal session and the API see the same plan.
 
 `har` writes `architect.clean.har` (cookies, auth headers and tokens removed; scripts, styles and images dropped) and an `architect.bodies/` folder with every request/response body, and prints the list of calls, with writes marked `*`. Only share the `.clean.har`, and only after checking it.
 

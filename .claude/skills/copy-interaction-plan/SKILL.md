@@ -33,11 +33,13 @@ If the session has expired or is missing, tell the user and ask with AskUserQues
   ```
 - **No:** stop, and say the copy wasn't run.
 
+`login` prints the account it signed in to, and refuses and removes a login to any account other than `portal_account`. If that happens, tell the user which account they signed in to and ask again. If an account has no `portal_account`, `session` says so: show the user the account it reports, and ask them to confirm it's the right one before going on.
+
 Ask separately for each account. Never log in without a yes. A later command can also report an expired session, because logins expire during long runs: ask the same way, then repeat that step.
 
 ## 3. Safety checks
 
-- **Writes:** only accounts with `allow_portal_writes = true` in `accounts.toml` can be written to, and the commands refuse the others. If the target isn't allowed, tell the user and stop. Don't change `accounts.toml` unless they ask.
+- **Writes:** only accounts with `allow_portal_writes = true` and `portal_account` in `accounts.toml` can be written to, and the commands refuse the others. If the target isn't allowed, tell the user and stop. Don't change `accounts.toml` unless they ask.
 - **Production:** if the target account or plan looks like production (e.g. "prod" in the name), or the user has described it that way, ask for explicit confirmation naming the account and plan, even if the request already asked for the copy.
 
 ## 4. Dry run

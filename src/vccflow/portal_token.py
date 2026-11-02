@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import requests
 
 from vccflow.config import Account
-from vccflow.portal import PortalError, SessionExpired, load_session
+from vccflow.portal import PortalError, SessionExpired, check_portal_account, extract_signed_in_account, load_session
 
 OIDC_SETTINGS = re.compile(r"var\s+oidcSettings\s*=\s*\{(.*?)\};", re.S)
 SETTING = r"\b{name}\s*:\s*'([^']*)'"
@@ -75,6 +75,8 @@ class PortalTokenProvider:
             if resp.status_code != 200:
                 raise SessionExpired(f"The portal login for '{self.account.name}' has expired. "
                                      f"Run: vccflow login -a {self.account.name}")
+            if self.account.portal_account:
+                check_portal_account(self.account, extract_signed_in_account(resp.text))
             self._settings = extract_oidc_settings(resp.text)
         return self._settings
 
