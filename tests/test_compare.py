@@ -145,3 +145,32 @@ def test_older_exports_without_page_fields_or_hashes_are_noted_not_flagged(tmp_p
     assert any("settings not compared" in n for n in report["notes"])
     # Hashes come from the files, so the audio difference is still found.
     assert any("different content" in d for d in report["differences"])
+
+
+def with_clid(account, behaviour, number=None):
+    doc = plan()
+    doc["source"] = {"account": account}
+    doc["plan"].update({"outboundClidBehaviour": behaviour, "outboundClid": number})
+    return doc
+
+
+def test_outbound_clid_setting_difference_is_reported():
+    report = compare_docs(with_clid("A", "DefaultAccountClid"), with_clid("B", "CustomerClid"))
+    assert "outbound CLID setting: source DefaultAccountClid | target CustomerClid" in report["differences"]
+
+
+def test_outbound_clid_same_is_silent():
+    report = compare_docs(with_clid("A", "InteractionPlanClid", "1"), with_clid("B", "InteractionPlanClid", "1"))
+    assert not [x for x in report["differences"] + report["notes"] if "CLID" in x]
+
+
+def test_outbound_clid_number_is_a_note_across_accounts_and_a_difference_within_one():
+    across = compare_docs(with_clid("A", "InteractionPlanClid", "1"), with_clid("B", "InteractionPlanClid", "2"))
+    assert not across["differences"] and any("number: source 1 | target 2" in n for n in across["notes"])
+    within = compare_docs(with_clid("A", "InteractionPlanClid", "1"), with_clid("A", "InteractionPlanClid", "2"))
+    assert any("number: source 1 | target 2" in d for d in within["differences"])
+
+
+def test_exports_without_outbound_clid_are_noted():
+    report = compare_docs(plan(), with_clid("B", "CustomerClid"))
+    assert report["differences"] == [] and any("outbound CLID not compared" in n for n in report["notes"])

@@ -74,9 +74,11 @@ vccflow compare-plans "<source plan>" "<target plan>" --from <source account> --
 
 It is read-only, and exits with an error when it finds differences; that is a result to report, not a failure. It reports:
 
-- **DIFFERENCES:** applets missing in either plan or of another type; paths missing or different, in both directions; settings, including skills; audio files (name and content); initial applet; reporting group.
+- **DIFFERENCES:** applets missing in either plan or of another type; paths missing or different, in both directions; settings, including skills; audio files (name and content); initial applet; reporting group; Outbound CLID setting.
 - **PROBLEMS:** paths to applets that aren't in the plan; GUIDs and IDs that don't resolve inside their own plan; data sources the target lacks, with the applets that use them.
-- **NOTES:** letter-case differences, which VCC ignores, and applets compared only through their editor page.
+- **NOTES:** letter-case differences, which VCC ignores; applets compared only through their editor page; a different Outbound CLID number between two accounts, which may be by design.
+
+A copy doesn't change plan-level settings. If the reporting group or Outbound CLID differs, say that the copy left it as it was on the target plan and that vccflow only reports it.
 
 Investigate any difference you can't explain before reporting it, without printing credentials.
 

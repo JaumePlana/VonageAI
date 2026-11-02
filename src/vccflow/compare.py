@@ -85,6 +85,27 @@ def load_export(folder: Path) -> dict:
     return doc
 
 
+def _outbound_clid_findings(source: dict, target: dict, report: dict) -> None:
+    """The plan's Outbound CLID. A copy does not change it, so a difference stays after copying."""
+    a, b = source["plan"], target["plan"]
+    if "outboundClidBehaviour" not in a or "outboundClidBehaviour" not in b:
+        report["notes"].append("outbound CLID not compared: not available for both plans")
+        return
+    x, y = a["outboundClidBehaviour"], b["outboundClidBehaviour"]
+    if x != y:
+        report["differences"].append(f"outbound CLID setting: source {_show(x)} | target {_show(y)}")
+    n, m = a.get("outboundClid"), b.get("outboundClid")
+    if not any(_diff(n, m)):
+        return
+    text = f"outbound CLID number: source {_show(n)} | target {_show(m)}"
+    accounts = {(d.get("source") or {}).get("account") for d in (source, target)}
+    # Numbers often differ per account by design; within an account a different number is a real difference.
+    if len(accounts) > 1:
+        report["notes"].append(f"{text} (different accounts: may be by design)")
+    else:
+        report["differences"].append(text)
+
+
 def compare_docs(source: dict, target: dict) -> dict:
     """Return {"differences": [...], "problems": [...], "notes": [...]} for two read_plan() documents."""
     report: dict[str, list[str]] = {"differences": [], "problems": [], "notes": []}
@@ -133,6 +154,8 @@ def compare_docs(source: dict, target: dict) -> dict:
         x, y = source["plan"].get(key), target["plan"].get(key)
         if x != y and not (_is_empty(x) and _is_empty(y)):
             report["differences"].append(f"{label}: source {_show(x)} | target {_show(y)}")
+
+    _outbound_clid_findings(source, target, report)
 
     for side, doc in (("source", source), ("target", target)):
         names = {a["name"] for a in doc["applets"]}

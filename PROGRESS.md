@@ -2,32 +2,35 @@
 
 Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](README.md).
 
-## Resume here (2026-11-02)
+## Resume here (end of 2026-11-02)
 
-**Where we are:** export, import and `copy-plan` work within an account and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Details are in the log below.
+**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Lists: plans, mappings, destinations, callback numbers (and rename). 105 tests pass. Details are in the log below.
 
-**State in VCC:**
-- Demo29 "POC Test" (`b918444e-…`) holds a full copy of JPlana "DISH Web Services" (15 applets). Empty it before copying into it again: the import refuses existing names.
-- 7 data sources the plan reads do not exist in Demo29 (the import warns and names the applets).
-- Portal logins expire: if a command says so, run `vccflow login -a <account>`.
+**Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`.
 
-**Skills:** `/copy-interaction-plan` (copy, then verify and compare both plans) and `/add-applet-type` (support a new applet type from a HAR), in `.claude/skills/`.
+**Rules that shape the code:**
+- `portal_account` is mandatory per account. A missing one, or a login signed in to another account, gets its saved login removed. vccflow never logs out of VCC: that ends the user's other sessions.
+- Copying needs only `region`, `portal_account`, a login, and `allow_portal_writes` on the target. API credentials are optional, and give the reporting group and an extra cross-check.
+- Plan-level settings (reporting group, Outbound CLID) are exported and compared, not copied. The user cannot change the Outbound CLID in the current UI, so vccflow only reports it. A POST on the plan might update it: not tried, by the user's decision.
 
-**Next steps:**
-1. More applet types: each needs a HAR of creating and saving it (e.g. ACD, Router, Data Router, Collect Input). `--skip-unsupported` copies the rest meanwhile. Use the project skill `/add-applet-type <har> [type]` (`.claude/skills/add-applet-type/`). Editor families seen in Demo29: React `Applet?` (Queue - Set Priority, Call Recording, Callback, Loop Counter, Call Connect Router, Schedule Router, Send Email, Virtual Assistant, Voice API); MVC form (ACD, Data Router, Skill Tagger, Collect Input, Set SLA, Set Whisper); classic ASP/ASPX (Router - Time Based, Router - Percentage, Route To Interaction Plan, Dial In Config, IVR Collect Digit, Transfer Call).
-2. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
-3. Test → PROD only after that; `allow_portal_writes` must be set per account.
-4. Later: DrawIO/Visio → `plan.json` → `import-plan`.
+**State in VCC:** Demo29 "POC Test" holds a full copy of JPlana "DISH Web Services" (15 applets). Empty it before copying into it again. Portal logins expire: `vccflow login -a <account>`.
+
+**Next steps, for the user to choose:**
+1. Offered: compare `ifm-prod` with `ifm-test` for the plans whose CLID is not a callback number.
+2. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Data Router, Collect Input...). The skill hasn't had its first real run yet. `--skip-unsupported` copies the rest meanwhile.
+3. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
+4. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
 
 **Open items for the user:**
-- Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors (printed in an earlier session). The copy to Demo29 carries them too.
+- Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors. Copies in zz Claude POC and Demo29 POC Test carry them too.
+- Tell the IFM owner about the 4 `ifm-prod` plans whose CLID is not a callback number (run `/outbound-clid-summary ifm-prod` for the list).
 - Where do `Contact Language`, `Contact Role`, `CustomerReference` and `JavascriptEngineUrl` come from? JPlana does not list them either.
 - `exports/` holds HARs and exports with credentials and cookies: git-ignored, keep private.
 
 ## Status (2026-10-28)
 
 ### Done
-- Python project `vccflow` set up (`.venv`, Python 3.15). 100 unit tests pass.
+- Python project `vccflow` set up (`.venv`, Python 3.15). 105 unit tests pass.
 - Per-account config: `accounts.toml` holds region and variable names; `.env` holds secrets. Configured: `Viessmann-test`, `Viessmann-prod` (emea).
 - Login (client credentials, `interaction-plans:read`) works against Viessmann Test.
 - Read-only commands work: `accounts`, `list-plans` (82 plans in Test), `list-mappings`, `export-plan`, `get`.
@@ -102,5 +105,6 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
 - [x] **Account check** (2026-11-02): the login saved as JPlana turned out to be signed in to IFM; `session` said valid and only a comparison with the API credentials showed it. New `portal_account` setting: the portal page states the account (`var user = {account: '...'}`). `login` prints it and deletes a login to another account; every portal command, and the portal login's token, checks it on first use; writes need it; reads without it warn. Copying no longer needs API credentials for safety; without them the export lacks the agent-interface flag and reporting group.
 - [x] **`portal_account` is mandatory** (2026-11-02): without it, or with a login signed in to another account, vccflow deletes the saved login and refuses to run. `login` works without the setting, to report the name, and doesn't keep that login. **No logout on VCC, by the user's decision:** `/Auth/logout` (what the portal's button does) was tried once, and the separate Demo29 login stopped working right after it, so it appears to end all the user's VCC sessions. A removed login stays valid on VCC until it expires. `/CallCentre/SwitchAccount` exists in the portal, which may be how logins land on other accounts.
 - [x] Callback numbers (2026-11-02, `exports/HAR/callbackNumbers.har`): **no API**. All on the classic page `CallCentre/userAdmin/system-settings.aspx` (`mainForm`, multipart, `__VIEWSTATE`). The list is the `SelectedClidNumber` dropdown (`name - number`, value = ID), the same as the CSV behind `DownloadClidButton` (`Clid,Name,NewName`). Rename posts `SelectedClidNumber`, `SelectedClidName`, `UpdateClidName=Update` **with all other settings on the page**, so `rename_callback_number` posts the fields as the browser would, then checks the confirmation message, the name, and that no other setting moved. Live rename tested in JPlana (`+34919033039` to "vccflow test" and back, 2026-11-02): the name changed and no other setting moved. The file upload (`UploadClidButton`) is not implemented. The CLID summary checks that each InteractionPlanClid number is a callback number.
+- [x] Plan-level Outbound CLID in export and comparison: `plan.outboundClidBehaviour`, `plan.outboundClid` in `plan.json`, read from the Interaction Manager API (the portal login's token without API credentials, which also gives those accounts the reporting group). `compare-plans` and `compare-exports` report a different setting as a difference, and a different number as a note across accounts, or a difference within one. Older exports get a "not compared" note. Reporting only.
 - [x] **Live Menu test passed** (2026-11-02): `copy-plan --from JPlana --to Demo29 "DISH Web Services" "POC Test"` copied all 15 applets, 2 WAVs and the initial applet. Read-back matches (one case-only note: `VoiceCall|Id`). "MNU Example" checked directly: 11 choices, timeout applet, failure applet (new ID and GUID resolve to the same applet by name), Timeout and TimeoutCount identical. That Menu is text-to-speech with a fixed voice, so a Menu with uploaded audio or a dynamic voice is covered by unit tests only.
 - [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.

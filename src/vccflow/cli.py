@@ -103,16 +103,30 @@ def cmd_list_destinations(args: argparse.Namespace) -> None:
 
 
 def _plan_metadata(portal: PortalClient, api: ManagerClient | None, plan_id: str) -> dict | None:
-    """Reporting group and agent-interface flag: from the public IPM API (it has both), else the
-    Interaction Manager API (reporting group only)."""
-    if not api:
-        return None
+    """Plan-level settings for the export: reporting group and Outbound CLID from the Interaction
+    Manager API (with the portal login's token if the account has no API credentials), and the
+    agent-interface flag from the public IPM API, which only API credentials can reach."""
+    metadata: dict = {}
     try:
-        return IpmClient(api.tokens).get_plan(plan_id)
-    except IpmError:
-        pass
-    plan = next((p for p in api.list_plans(include_archived=True) if p["id"] == plan_id), None)
-    return {"reportingGroupName": plan.get("reportingGroup"), "displayInAgentInterface": None} if plan else None
+        client = api or ManagerClient(PortalTokenProvider(portal.account))
+        plan = next((p for p in client.list_plans(include_archived=True) if p["id"] == plan_id), None)
+        if plan:
+            metadata = {
+                "reportingGroupName": plan.get("reportingGroup"),
+                "displayInAgentInterface": None,
+                "outboundClidBehaviour": plan.get("outboundClidBehaviour"),
+                "outboundClid": plan.get("outboundClid"),
+            }
+    except (AuthError, ManagerError, PortalError) as e:
+        print(f"WARNING: could not read the plan's settings: {e}", file=sys.stderr)
+    if api:
+        try:
+            ipm = IpmClient(api.tokens).get_plan(plan_id)
+            metadata.setdefault("reportingGroupName", ipm.get("reportingGroupName"))
+            metadata["displayInAgentInterface"] = ipm.get("displayInAgentInterface")
+        except IpmError:
+            pass  # the public API is not enabled on every account
+    return metadata or None
 
 
 def _export(portal: PortalClient, api: ManagerClient | None, plan: str, out: str | None) -> tuple[Path, str]:

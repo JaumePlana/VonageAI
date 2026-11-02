@@ -20,6 +20,8 @@ from typing import Any, Callable
 from vccflow.portal import PortalClient, PortalError
 
 FORMAT = "vccflow.plan/1"
+# Plan-level settings saved in the export. They are reported, not imported: a copy leaves them as they are.
+PLAN_SETTINGS = ("reportingGroupName", "displayInAgentInterface", "outboundClidBehaviour", "outboundClid")
 
 # Applet properties that identify an applet in one account; rebuilt on import.
 ACCOUNT_SPECIFIC = {
@@ -297,8 +299,7 @@ def export_plan(
         "plan": {
             "name": plan_name,
             "initialApplet": initial,
-            **({"reportingGroupName": metadata.get("reportingGroupName"),
-                "displayInAgentInterface": metadata.get("displayInAgentInterface")} if metadata else {}),
+            **({k: metadata.get(k) for k in PLAN_SETTINGS if k in metadata} if metadata else {}),
         },
         "requires": {"dataSources": data_sources, "dataSourcesNeeded": sorted(data_sources_needed(applets))},
         "applets": applets,
