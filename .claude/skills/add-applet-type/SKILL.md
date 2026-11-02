@@ -1,14 +1,14 @@
 ---
 name: add-applet-type
-description: Add support for a new VCC applet type to vccflow from a browser HAR recording, so export-plan, import-plan and copy-plan can handle it. Use when the user adds a HAR for an applet type (e.g. ACD, Router, Data Router, Collect Input) or asks to support copying one. Arguments are the HAR name and the applet type, e.g. "exports/HAR/acd.har ACD".
+description: Add support for a new VCC applet type to vccflow from a browser HAR recording, so export-plan, import-plan, copy-plan and compare-plans can handle it. Use when the user adds a HAR for an applet type (e.g. ACD, Router, Data Router, Collect Input) or asks to support copying one. Arguments are the HAR name and the applet type, e.g. "exports/HAR/acd.har ACD".
 argument-hint: <har file> [applet type]
 ---
 
 # Add an applet type to vccflow
 
-Turn a HAR of creating and saving an applet into export and import support, with tests and a live check. Base the code on what the recording shows, never on guesses about the portal.
+Turn a HAR of creating and saving an applet into export, import and comparison support, with tests and a live check. Base the code on what the recording shows, never on guesses about the portal.
 
-Read `PROGRESS.md` ("Resume here") first, then `src/vccflow/export.py`, `src/vccflow/importer.py` and `src/vccflow/portal.py`.
+Read `PROGRESS.md` ("Resume here") first, then `src/vccflow/export.py`, `src/vccflow/importer.py`, `src/vccflow/compare.py` and `src/vccflow/portal.py`.
 
 ## Rules
 
@@ -61,28 +61,42 @@ This is where copies go wrong. Search the properties for applet names, GUIDs and
 - Uploaded audio with `{"AppletMedia": {"Id": n}}` is found by `find_media_refs`. Anything else needs its own handling.
 - Add the type's data source fields to `data_sources_used` (reads) or `data_sources_created` (sets), in `export.py`. Names ignore letter case.
 
-## 5. Tests
+## 5. Comparison
+
+`compare-plans` and `compare-exports` work from the exported format. Once the type exports, its settings, `next` paths and audio are compared automatically, and it stops being compared through editor page fields. Check what doesn't follow by itself:
+
+- **ID check:** `broken_connection_ids` in `export.py` knows `*Guid` fields and `FailureAppletId`. Add any new connection field holding a numeric ID, or a GUID stored in a list or map, so that an ID outside the plan is reported.
+- **False differences between accounts:** any setting left holding an ID that differs per account (skill, queue, group, schedule) will show as a difference even in a correct copy. Export it by name, or drop it if another setting already holds the name. If neither is possible, say so in the report.
+- **What must be compared:** skills, queues, conditions and other references must end up in `settings` or `next`, not be filtered out as lookups. A lookup list (all the account's skills, say) must be filtered out, as in `DC_NOT_CONFIG`, or it shows as a difference between accounts.
+- **List order:** `_diff` in `compare.py` compares lists in order, which is right for routing branches, where order changes behaviour. If VCC returns a list in varying order and order doesn't matter, as with a set of skills, normalise it (sort it on export) rather than reporting a difference.
+- **Credentials:** add any new field that can hold a secret to `SENSITIVE` in `compare.py`, so the report hides its values.
+- **Data sources:** step 4 feeds `check_data_sources`, so applets of this type now count in that check.
+
+## 6. Tests
 
 Add unit tests from the recorded values, as in `tests/test_importer.py` and `tests/test_data_connector.py`:
 - Export: connections by name, account-specific values gone.
 - Import: connections rebuilt with the target's IDs and GUIDs, and no export-only keys left in the saved properties.
 - Form builders (if any) reproduce the recorded post, and unrecorded cases are refused.
 - Data source fields.
+- Comparison, in `tests/test_compare.py`: with two documents holding the type, a changed or missing path and a changed setting (e.g. a different skill) are reported in both directions, and the same plan with different account-specific IDs reports nothing. New ID fields in `broken_connection_ids` are covered too.
 
 For a form-based type, also rebuild each recorded save from its response page and compare it with the recorded post.
 
 Run `.venv/Scripts/python.exe -m pytest -q`. All must pass.
 
-## 6. Live check
+## 7. Live check
 
 If the portal login has expired, ask the user to run `! .venv/Scripts/vccflow.exe login -a <account>`.
 
 1. Ask which plan contains the type and which empty scratch plan to copy into, unless the user said.
 2. `vccflow copy-plan "<plan>" "<scratch>" --from <a> --to <b> --dry-run`, then without `--dry-run`.
 3. The read-back must match. A difference is a bug or a new finding: investigate, don't dismiss it. Compare the new applet's connections directly as well, resolving its IDs and GUIDs against the target's applet list.
+4. Run `vccflow compare-plans "<plan>" "<scratch>" --from <a> --to <b>`. A correct copy must show no differences for this type, and no "compared through its editor page fields only" note for it.
+5. Prove the comparison sees changes: compare the plan with another that has the type configured differently, if the account has one, or ask the user to change a setting in the scratch copy. It must report that difference. Don't change the applet yourself unless the user agrees.
 
-## 7. Finish
+## 8. Finish
 
 - Add the type to the supported list in `README.md`.
 - Add the findings to `PROGRESS.md`: endpoints, connection fields, what was tested live, and what wasn't. Update the test count and "Resume here".
-- Report plainly what works, what was tested live, what was only unit-tested, and which options the recording didn't cover. Don't commit unless asked.
+- Report plainly what works, what was tested live, what was only unit-tested, which options the recording didn't cover, and what the comparison still can't see for this type. Don't commit unless asked.
