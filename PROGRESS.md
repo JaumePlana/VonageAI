@@ -12,7 +12,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 - Portal logins expire: if a command says so, run `vccflow login -a <account>`.
 
 **Next steps:**
-1. More applet types: each needs a HAR of creating and saving it (e.g. ACD, Router, Data Router, Collect Input). `--skip-unsupported` copies the rest meanwhile.
+1. More applet types: each needs a HAR of creating and saving it (e.g. ACD, Router, Data Router, Collect Input). `--skip-unsupported` copies the rest meanwhile. Use the project skill `/add-applet-type <har> [type]` (`.claude/skills/add-applet-type/`). Editor families seen in Demo29: React `Applet?` (Queue - Set Priority, Call Recording, Callback, Loop Counter, Call Connect Router, Schedule Router, Send Email, Virtual Assistant, Voice API); MVC form (ACD, Data Router, Skill Tagger, Collect Input, Set SLA, Set Whisper); classic ASP/ASPX (Router - Time Based, Router - Percentage, Route To Interaction Plan, Dial In Config, IVR Collect Digit, Transfer Call).
 2. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
 3. Test → PROD only after that; `allow_portal_writes` must be set per account.
 4. Later: DrawIO/Visio → `plan.json` → `import-plan`.
