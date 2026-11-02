@@ -9,6 +9,7 @@ from vccflow.config import ConfigError, load_account
 ACCOUNTS = """
 [accounts.acme-test]
 region = "emea"
+portal_account = "Acme"
 client_id_env = "T_ID"
 client_secret_env = "T_SECRET"
 """

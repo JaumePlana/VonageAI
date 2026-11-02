@@ -11,7 +11,6 @@ import base64
 import html as html_lib
 import json
 import re
-import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -252,14 +251,35 @@ def extract_signed_in_account(html: str) -> str:
     return html_lib.unescape(name.group(1))
 
 
+def remove_session(account: Account) -> bool:
+    """Delete the saved login. Return True if there was one.
+
+    It does not log out of VCC: /Auth/logout ended the user's other VCC sessions too
+    (other saved logins, and possibly the browser). The login stays valid on VCC until
+    it expires, but vccflow can no longer use it.
+    """
+    path = session_file(account)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
 def check_portal_account(account: Account, signed_in: str) -> None:
-    """Refuse a login signed in to another account than the configured portal_account."""
-    if account.portal_account and signed_in.casefold() != account.portal_account.casefold():
+    """Refuse a login that is not signed in to the configured portal_account, and remove it."""
+    if signed_in.casefold() == (account.portal_account or "").casefold():
+        return
+    remove_session(account)
+    if account.portal_account:
         raise WrongAccount(
             f"The portal login for '{account.name}' is signed in to '{signed_in}', "
-            f"but portal_account is '{account.portal_account}'. "
+            f"but portal_account is '{account.portal_account}'. The saved login was removed. "
             f"Run: vccflow login -a {account.name} and sign in to '{account.portal_account}'"
         )
+    raise WrongAccount(
+        f"The portal login for '{account.name}' is signed in to '{signed_in}', and the account has no portal_account. "
+        f"The saved login was removed. If '{signed_in}' is the right account, add this to "
+        f"[accounts.{account.name}] in accounts.toml and log in again:\nportal_account = \"{signed_in}\""
+    )
 
 
 def encode_properties(props: dict) -> str:
@@ -289,11 +309,7 @@ class PortalClient:
         if self._account_checked:
             return
         self._account_checked = True
-        if self.account.portal_account:
-            check_portal_account(self.account, self.signed_in_account())
-        else:
-            print(f"WARNING: no portal_account set for '{self.account.name}': "
-                  "not checking which account the login is signed in to.", file=sys.stderr)
+        check_portal_account(self.account, self.signed_in_account())
 
     def _request(self, method: str, path: str, *, expect_redirect: bool = False, **kwargs) -> requests.Response:
         self._check_account()
@@ -320,11 +336,6 @@ class PortalClient:
             raise PortalError(f"POST {path}: response is not JSON ({resp.text[:200]!r})") from e
 
     def _require_writes(self) -> None:
-        if self.account.allow_portal_writes and not self.account.portal_account:
-            raise PortalError(
-                f"Writes need portal_account for '{self.account.name}', to be sure which account is written to. "
-                f"Run: vccflow session -a {self.account.name} to see the account's name, and set it in accounts.toml."
-            )
         if not self.account.allow_portal_writes:
             raise PortalError(
                 f"Writes are disabled for '{self.account.name}'. "

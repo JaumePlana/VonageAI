@@ -23,7 +23,8 @@ class Account:
     client_secret: str | None = None
     # Portal writes (create/save/delete applets) must be enabled per account.
     allow_portal_writes: bool = False
-    # Name of the VCC account the portal login must be signed in to (see portal.py).
+    # Name of the VCC account the portal login must be signed in to. Mandatory in
+    # accounts.toml; empty only while `vccflow login` finds out the name.
     portal_account: str | None = None
 
     @property
@@ -53,6 +54,17 @@ class Account:
         return bool(self.client_id and self.client_secret)
 
 
+class MissingPortalAccount(ConfigError):
+    """The account has no portal_account in accounts.toml."""
+
+    def __init__(self, account: Account):
+        super().__init__(
+            f"Account '{account.name}' has no portal_account in accounts.toml, so vccflow cannot be sure which "
+            f"VCC account it works on. Run: vccflow login -a {account.name} to find out the account's name."
+        )
+        self.account = account
+
+
 def load_accounts_file(path: Path) -> dict:
     if not path.exists():
         raise ConfigError(
@@ -66,7 +78,8 @@ def list_account_names(path: Path) -> list[str]:
     return sorted(load_accounts_file(path))
 
 
-def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Account:
+def load_account(name: str, path: Path, env: dict[str, str] | None = None,
+                 require_portal_account: bool = True) -> Account:
     env = os.environ if env is None else env
     accounts = load_accounts_file(path)
     if name not in accounts:
@@ -87,7 +100,7 @@ def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Ac
             raise ConfigError(f"Account '{name}': environment variable {var} is not set")
         return value
 
-    return Account(
+    account = Account(
         name=name,
         region=region,
         client_id=secret("client_id_env"),
@@ -95,3 +108,6 @@ def load_account(name: str, path: Path, env: dict[str, str] | None = None) -> Ac
         allow_portal_writes=bool(entry.get("allow_portal_writes", False)),
         portal_account=entry.get("portal_account"),
     )
+    if require_portal_account and not account.portal_account:
+        raise MissingPortalAccount(account)
+    return account

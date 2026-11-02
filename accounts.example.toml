@@ -6,9 +6,9 @@
 # client_id_env / client_secret_env: optional, needed for the IPM API commands.
 # allow_portal_writes: set to true to let vccflow create/save/delete applets
 #   through the portal session. Leave it off for PROD until a copy is proven.
-# portal_account: the VCC account's name as the portal shows it (vccflow session
-#   prints it). vccflow refuses a login signed in to any other account, and
-#   writes need it.
+# portal_account: MANDATORY. The VCC account's name as the portal shows it
+#   (vccflow login tells you). If it is missing, or a login is signed in to any
+#   other account, vccflow removes the saved login and refuses to run.
 
 [accounts.acme-test]
 region = "emea"
@@ -18,5 +18,6 @@ client_secret_env = "ACME_TEST_CLIENT_SECRET"
 
 [accounts.acme-prod]
 region = "emea"
+portal_account = "AcmeProd"
 client_id_env = "ACME_PROD_CLIENT_ID"
 client_secret_env = "ACME_PROD_CLIENT_SECRET"

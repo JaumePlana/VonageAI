@@ -75,8 +75,7 @@ class PortalTokenProvider:
             if resp.status_code != 200:
                 raise SessionExpired(f"The portal login for '{self.account.name}' has expired. "
                                      f"Run: vccflow login -a {self.account.name}")
-            if self.account.portal_account:
-                check_portal_account(self.account, extract_signed_in_account(resp.text))
+            check_portal_account(self.account, extract_signed_in_account(resp.text))
             self._settings = extract_oidc_settings(resp.text)
         return self._settings
 

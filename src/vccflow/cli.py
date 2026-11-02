@@ -11,11 +11,11 @@ from dotenv import load_dotenv
 
 from vccflow import compare, export, har, importer, manager, poc
 from vccflow.auth import AuthError, TokenProvider
-from vccflow.config import ConfigError, list_account_names, load_account
+from vccflow.config import ConfigError, MissingPortalAccount, list_account_names, load_account
 from vccflow.ipm import IpmClient, IpmError
 from vccflow.manager import ManagerClient, ManagerError
 from vccflow.media_channels import MediaChannelsClient, MediaChannelsError
-from vccflow.portal import PortalClient, PortalError, WrongAccount, check_portal_account
+from vccflow.portal import PortalClient, PortalError, check_portal_account, remove_session
 from vccflow.portal_token import PortalTokenProvider
 
 
@@ -197,8 +197,7 @@ def cmd_session(args: argparse.Namespace) -> None:
     account = load_account(args.account, Path(args.config))
     signed_in = PortalClient(account).signed_in_account()
     check_portal_account(account, signed_in)
-    note = "" if account.portal_account else " (no portal_account set: not checked)"
-    print(f"Portal session for '{account.name}' is valid: logged in to '{signed_in}'{note}.")
+    print(f"Portal session for '{account.name}' is valid: logged in to '{signed_in}'.")
 
 
 def cmd_get(args: argparse.Namespace) -> None:
@@ -222,18 +221,12 @@ def cmd_har(args: argparse.Namespace) -> None:
 def cmd_login(args: argparse.Namespace) -> None:
     from vccflow.portal_login import login
 
-    account = load_account(args.account, Path(args.config))
+    # The one command that works without portal_account: it is how the name is found out.
+    account = load_account(args.account, Path(args.config), require_portal_account=False)
     path = login(account, browser_channel=args.browser)
     signed_in = PortalClient(account).signed_in_account()
-    try:
-        check_portal_account(account, signed_in)
-    except WrongAccount:
-        Path(path).unlink()  # never keep a login to the wrong account under this name
-        raise
+    check_portal_account(account, signed_in)
     print(f"You have been logged in to '{signed_in}'. Session saved to {path}")
-    if not account.portal_account:
-        print(f"Add this to [accounts.{account.name}] in accounts.toml to check it from now on, if it is the right account:\n"
-              f'portal_account = "{signed_in}"')
 
 
 def cmd_applets(args: argparse.Namespace) -> None:
@@ -382,6 +375,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
+    except MissingPortalAccount as e:
+        print(f"error: {e}", file=sys.stderr)
+        if remove_session(e.account):
+            print(f"The saved login for '{e.account.name}' was removed.", file=sys.stderr)
+        return 1
     except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

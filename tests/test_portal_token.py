@@ -9,6 +9,7 @@ from vccflow.portal import PortalError, SessionExpired
 from vccflow.portal_token import PortalTokenProvider, extract_oidc_settings, token_from_redirect
 
 PAGE = """<script>
+    var user = { account: 'Acme' };
     var oidcSettings = {
         authority: 'https://emea.newvoicemedia.com/Auth/',
         client_id: 'contactworld_oidc_client',
@@ -38,7 +39,7 @@ def provider():
         MagicMock(status_code=200, text=PAGE),
         MagicMock(status_code=302, is_redirect=True, headers={"Location": REDIRECT}),
     ]
-    return PortalTokenProvider(Account(name="t", region="emea"), cookies=cookies, clock=lambda: 0), cookies
+    return PortalTokenProvider(Account(name="t", region="emea", portal_account="Acme"), cookies=cookies, clock=lambda: 0), cookies
 
 
 def test_asks_only_for_the_needed_scope_and_caches_it():
