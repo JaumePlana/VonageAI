@@ -44,6 +44,15 @@ PAGE_MODEL = re.compile(r"JSON\.parse\(htmlDecode\('(.*?)'\)\)", re.S)
 MODEL_LOOKUPS = ("All", "Possible", "Formatted", "QueryKeys", "DataTypeOperators", "UnsavedChanges", "Show")
 SIGNED_IN_USER = re.compile(r"var\s+user\s*=\s*\{(.*?)\};", re.S)
 SIGNED_IN_ACCOUNT = re.compile(r"\baccount\s*:\s*'([^']*)'")
+SETTINGS_PAGE = "../userAdmin/system-settings.aspx"
+CALLBACK_SELECT, CALLBACK_NAME, CALLBACK_FILE, CALLBACK_BUTTON = (
+    "SelectedClidNumber", "SelectedClidName", "ClidUpload", "UpdateClidName")
+CALLBACK_RENAMED = "The presented name for the callback number selected has been updated"
+# Page state, the two callback fields, and a list that changes selection per request.
+SETTINGS_NOT_COMPARED = {
+    "__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION", "AccountNumbers", "Pin",
+    CALLBACK_SELECT, CALLBACK_NAME, CALLBACK_FILE,
+}
 LINK_TEXT = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
 # First cell of each plan row: "<name><br> Interaction plan type: <type> ...".
 PLAN_ROW = re.compile(r'<tr id="([^"]+)">\s*<td\b[^>]*>\s*(.*?)<br>\s*Interaction plan type:\s*([^<]*?)\s*<', re.S)
@@ -282,6 +291,107 @@ def check_portal_account(account: Account, signed_in: str) -> None:
     )
 
 
+class _BrowserForm(HTMLParser):
+    """Collect a page's form exactly as a browser would submit it, without pressing any button."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.fields: list[list] = []  # [name, value], in page order
+        self.options: dict[str, list[tuple[str, str]]] = {}  # select name -> [(value, text)]
+        self._select: list | None = None
+        self._option: list | None = None
+        self._has_selected = False
+        self._textarea: list | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        name = a.get("name")
+        if tag == "input" and name and "disabled" not in a:
+            kind = (a.get("type") or "text").lower()
+            if kind in ("submit", "button", "image", "reset") or (kind in ("checkbox", "radio") and "checked" not in a):
+                return
+            self.fields.append([name, "" if kind == "file" else a.get("value") or ""])
+        elif tag == "select" and name and "disabled" not in a:
+            self._select, self._has_selected = [name, None], False
+            self.fields.append(self._select)
+            self.options[name] = []
+        elif tag == "option" and self._select:
+            value = a.get("value")
+            self._option = [value, ""]
+            self.options[self._select[0]].append(self._option)
+            # A select with nothing marked submits its first option.
+            if "selected" in a or self._select[1] is None:
+                self._select[1] = value
+        elif tag == "textarea" and name:
+            self._textarea = [name, ""]
+            self.fields.append(self._textarea)
+
+    def handle_endtag(self, tag):
+        if tag == "select":
+            self._select = self._option = None
+        elif tag == "option":
+            self._option = None
+        elif tag == "textarea":
+            self._textarea = None
+
+    def handle_data(self, data):
+        if self._option:
+            self._option[1] += data
+        elif self._textarea:
+            self._textarea[1] += data
+
+
+def extract_callback_numbers(html: str) -> list[dict]:
+    """Callback numbers from the settings page: the dropdown shows "name - number".
+
+    The name can hold a hyphen too, so the last one separates them, as the page's own script does.
+    """
+    parser = _BrowserForm()
+    parser.feed(html)
+    options = parser.options.get(CALLBACK_SELECT)
+    if options is None:
+        raise PortalError("The settings page has no callback number list; the page format may have changed")
+    numbers = []
+    for value, text in options:
+        name, _, number = html_lib.unescape(text).strip().rpartition("-")
+        numbers.append({"id": value, "name": name.strip(), "number": number.strip()})
+    return numbers
+
+
+def digits(number: Any) -> str:
+    return re.sub(r"\D", "", str(number or ""))
+
+
+def callback_rename_form(html: str, number_id: str, new_name: str) -> list[tuple]:
+    """The multipart post for the page's "Update" button of a callback number.
+
+    The page posts all its settings with any button, so everything but the number and
+    its name stays exactly as the page shows it.
+    """
+    parser = _BrowserForm()
+    parser.feed(html)
+    form = []
+    for name, value in parser.fields:
+        if name == CALLBACK_SELECT:
+            value = number_id
+        elif name == CALLBACK_NAME:
+            value = new_name
+        form.append((name, value))
+        if name == CALLBACK_NAME:
+            form.append((CALLBACK_BUTTON, "Update"))  # the pressed button, in its page position
+    names = {n for n, _ in form}
+    if not {CALLBACK_SELECT, CALLBACK_NAME, CALLBACK_FILE} <= names:
+        raise PortalError("The settings page has no callback number form; the page format may have changed")
+    return form
+
+
+def settings_snapshot(html: str) -> dict[str, Any]:
+    """The page's settings, to compare before and after a change."""
+    parser = _BrowserForm()
+    parser.feed(html)
+    return {n: v for n, v in parser.fields if n not in SETTINGS_NOT_COMPARED}
+
+
 def encode_properties(props: dict) -> str:
     return base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii")
 
@@ -380,6 +490,10 @@ class PortalClient:
     def list_plans(self) -> list[dict]:
         """All plans of the account, read from the Architect's plan page (no API needed)."""
         return extract_plans(self._request("GET", "applications.asp").text)
+
+    def list_callback_numbers(self) -> list[dict]:
+        """The account's callback numbers as {id, name, number}, read from the settings page."""
+        return extract_callback_numbers(self._request("GET", SETTINGS_PAGE).text)
 
     def get_initial_applet(self, plan_id: str) -> str | None:
         """Name of the applet the plan starts with, or None if it is not set."""
@@ -482,6 +596,35 @@ class PortalClient:
         if any(errors):
             raise PortalError(f"Saving Data Connector '{name}' was refused: {'; '.join(e for e in errors if e)}")
         return extract_data_connector(resp.text)
+
+    def rename_callback_number(self, which: str, new_name: str) -> dict:
+        """Rename a callback number, given its number, ID or current name. Return it as read back.
+
+        Checks afterwards that the name changed and that no other setting on the page moved.
+        """
+        self._require_writes()
+        if not new_name or len(new_name) > 50:
+            raise PortalError("A callback number's name must be 1 to 50 characters")
+        page = self._request("GET", SETTINGS_PAGE).text
+        numbers = extract_callback_numbers(page)
+        matches = [n for n in numbers if which in (n["id"], n["name"]) or (digits(which) and digits(which) == digits(n["number"]))]
+        if len(matches) != 1:
+            raise PortalError(f"Expected one callback number matching '{which}', found {len(matches)}")
+        before = settings_snapshot(page)
+        fields = callback_rename_form(page, matches[0]["id"], new_name)
+        files = [(n, ("", b"", "application/octet-stream") if n == CALLBACK_FILE else (None, v)) for n, v in fields]
+        resp = self._request("POST", SETTINGS_PAGE, files=files)
+        if CALLBACK_RENAMED not in resp.text:
+            raise PortalError(f"The portal did not confirm renaming {matches[0]['number']}; check the settings page")
+        after_page = self._request("GET", SETTINGS_PAGE).text
+        moved = {k for k in before.keys() | settings_snapshot(after_page).keys()
+                 if before.get(k) != settings_snapshot(after_page).get(k)}
+        if moved:
+            raise PortalError(f"The rename changed other settings on the page, check them now: {', '.join(sorted(moved))}")
+        saved = next(n for n in extract_callback_numbers(after_page) if n["id"] == matches[0]["id"])
+        if saved["name"] != new_name:
+            raise PortalError(f"{saved['number']} is still named '{saved['name']}' after the rename")
+        return saved
 
     def set_initial_applet(self, plan_id: str, name: str) -> None:
         """Set the applet the plan starts with.

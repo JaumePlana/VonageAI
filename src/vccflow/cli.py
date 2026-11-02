@@ -76,6 +76,16 @@ def cmd_list_mappings(args: argparse.Namespace) -> None:
     _print_json(_with_portal_login_fallback(args, lambda c: c.list_mappings()))
 
 
+def cmd_list_callback_numbers(args: argparse.Namespace) -> None:
+    _print_json(PortalClient(load_account(args.account, Path(args.config))).list_callback_numbers())
+
+
+def cmd_rename_callback_number(args: argparse.Namespace) -> None:
+    portal = PortalClient(load_account(args.account, Path(args.config)))
+    saved = portal.rename_callback_number(args.number, args.name)
+    print(f"Renamed {saved['number']} to '{saved['name']}' in '{args.account}'. No other setting on the page changed.")
+
+
 def cmd_list_destinations(args: argparse.Namespace) -> None:
     channels = tuple(args.channel) if args.channel else manager.CHANNELS
     account = load_account(args.account, Path(args.config))
@@ -280,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_list_plans)
     with_account(sub.add_parser("list-mappings", help="list mappings (address -> plan, with rules)")).set_defaults(
         func=cmd_list_mappings)
+    with_account(sub.add_parser("list-callback-numbers", help="list callback numbers (portal)")).set_defaults(
+        func=cmd_list_callback_numbers)
+    p = with_account(sub.add_parser("rename-callback-number", help="rename a callback number (portal, writes)"))
+    p.add_argument("number", help="the callback number, its ID or its current name")
+    p.add_argument("name", help="new name, up to 50 characters")
+    p.set_defaults(func=cmd_rename_callback_number)
     p = with_account(sub.add_parser("list-destinations", help="list destinations (addresses) per channel"))
     p.add_argument("--channel", action="append", choices=manager.CHANNELS, help="only this channel (repeatable)")
     p.add_argument("--source", choices=("media-channels", "manager"), default="media-channels",
