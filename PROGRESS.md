@@ -17,9 +17,10 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 
 **Next steps, for the user to choose:**
 1. Offered: compare `ifm-prod` with `ifm-test` for the plans whose CLID is not a callback number.
-2. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Data Router, Collect Input...). The skill hasn't had its first real run yet. `--skip-unsupported` copies the rest meanwhile.
-3. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
-4. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
+2. Offered: make `compare-plans` easier to read (plan-level differences first, the rest grouped by applet). Viessmann Test vs PROD "DE Sales Voice" lists 744 differences, not analysed; applet types compared only through page fields probably inflate that.
+3. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Data Router, Collect Input...). The skill hasn't had its first real run yet. `--skip-unsupported` copies the rest meanwhile.
+4. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers.
+5. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
 
 **Open items for the user:**
 - Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors. Copies in zz Claude POC and Demo29 POC Test carry them too.
