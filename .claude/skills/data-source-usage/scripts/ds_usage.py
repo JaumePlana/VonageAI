@@ -40,6 +40,7 @@ VA_OUTPUT = re.compile(r"VirtualAssistantParamsToDataSourcesMapping\[\d+\]\.Dest
 # Fields that name an applet (where to go next, the applet itself), never a data source.
 APPLET_FIELD = re.compile(r"NextApplet|PossibleNextApplets|FormattedNextApplets|AppletName$|currentApplet|"
                           r"Url$|RouteToApplet|(^|\.)Applet\d*$|defaultapplet|DefaultAppletInstanceName", re.I)
+PICKERS = re.compile(r"PossibleNextApplets|FormattedNextApplets")  # every applet of the plan, for the editor
 DS_FIELD = re.compile(r"DataSource|\.Key$|Destination|Item1$", re.I)
 APPLET_LABEL = re.compile(r"^(.*) \([^()]*\)$")  # "Name (Applet Type)" in next-applet pickers
 
@@ -174,14 +175,18 @@ def other_hits(applet: dict, match, known_paths: set[str], applet_names: set[str
 
 
 def links(plan_applets: list[dict], applet: dict) -> tuple[list[str], list[str]]:
-    """Applets that point to this one, and the ones it points to (by name, in the same plan)."""
+    """Applets that point to this one, and the ones it points to (by name, in the same plan).
+
+    A Data Connector's PossibleNextApplets / FormattedNextApplets list every applet of the
+    plan (the editor's picker), not where it goes: they are left out.
+    """
     names = {a["listing"]["name"] for a in plan_applets}
     me = applet["listing"]["name"]
 
     def pointed(a):
         body = {k: v for k, v in a.items() if k in ("state", "dc", "form")}
         return {v for p, v in walk(body) if isinstance(v, str) and v in names and not DROPDOWNS.search(p)
-                and not p.endswith("AppletName")}
+                and not PICKERS.search(p) and not p.endswith("AppletName")}
 
     nxt = sorted(pointed(applet) - {me})
     prev = sorted(a["listing"]["name"] for a in plan_applets if a is not applet and me in pointed(a))

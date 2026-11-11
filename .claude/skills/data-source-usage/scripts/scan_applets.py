@@ -6,7 +6,9 @@ Usage (from the project root):
 Writes exports/<account>/applet-scan/<plan name>.json (one per plan) and manifest.json.
 The plan ID is kept inside each file, so renamed plans are followed.
 It resumes: plans already saved are skipped, so a run stopped by an expired login
-continues where it left off. --fresh deletes the previous scan first.
+continues where it left off. --fresh starts over: a complete previous scan is moved to
+exports/<account>/applet-scan-previous (replacing the one there), so compare_scans.py can
+show what changed; an incomplete one is discarded.
 
 No audio is downloaded and nothing is changed in VCC. The files hold Data Connector
 settings, credentials included: exports/ is git-ignored, keep it private.
@@ -99,19 +101,49 @@ def tidy(out: Path, files: dict[str, str]) -> None:
         tmp.rename(out / files[pid])
 
 
+def empty(folder: Path) -> None:
+    """Empty the folder rather than delete it: on Windows, OneDrive or an open editor
+    can hold the folder itself and refuse its removal."""
+    for f in folder.iterdir():
+        shutil.rmtree(f) if f.is_dir() else f.unlink()
+
+
+def scan_finished(folder: Path) -> bool:
+    try:
+        return bool(json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("finished"))
+    except (OSError, ValueError):
+        return False
+
+
+def keep_previous(out: Path) -> None:
+    """Before a fresh scan: move a complete scan to applet-scan-previous, for compare_scans.py.
+
+    An incomplete scan is just discarded, so it never replaces a complete previous one.
+    """
+    previous = out.with_name("applet-scan-previous")
+    if scan_finished(out):
+        previous.mkdir(exist_ok=True)
+        empty(previous)
+        for f in out.iterdir():
+            shutil.move(str(f), str(previous / f.name))
+        print(f"Previous scan kept in {previous}", flush=True)
+    else:
+        empty(out)
+
+
 def main() -> int:
     os.chdir(Path(__file__).resolve().parents[4])  # the project root
     ap = argparse.ArgumentParser()
     ap.add_argument("account")
-    ap.add_argument("--fresh", action="store_true", help="delete the previous scan first")
+    ap.add_argument("--fresh", action="store_true", help="start over, keeping a complete previous scan in applet-scan-previous")
     args = ap.parse_args()
 
     load_dotenv(".env")
     account = load_account(args.account, Path("accounts.toml"))
     out = Path("exports") / args.account / "applet-scan"
-    if args.fresh and out.exists():
-        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    if args.fresh:
+        keep_previous(out)
     manifest_file = out / "manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
     manifest.setdefault("account", args.account)

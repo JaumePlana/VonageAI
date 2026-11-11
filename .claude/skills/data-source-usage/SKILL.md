@@ -1,6 +1,6 @@
 ---
 name: data-source-usage
-description: Find where data sources are initialized (set) and consumed (read) across all the Interaction Plans of a VCC account, read-only. Use when the user asks which applets or plans reference, set, use or read a data source, whether a data source is used at all, or for unused data sources, e.g. "which applets use the data source 'SF Error Response' in Viessmann-test". The account is a name from accounts.toml.
+description: Find where data sources are initialized (set) and consumed (read) across all the Interaction Plans of a VCC account, read-only. Use when the user asks which applets or plans reference, set, use or read a data source, whether a data source is used at all, or for unused data sources, e.g. "which applets use the data source 'SF Error Response' in Viessmann-test". Also use it to rescan an account after the user changed its plans and show what changed since the previous scan, e.g. "I changed PROD, rescan and compare". The account is a name from accounts.toml.
 argument-hint: <account> "<data source>" ["<data source>" ...]
 ---
 
@@ -8,10 +8,11 @@ argument-hint: <account> "<data source>" ["<data source>" ...]
 
 Read-only: this skill never changes anything in VCC. Run commands from the project root.
 
-The VCC API has no applet data, so the skill reads every applet's editor page through the portal login, then analyses that offline. Two scripts in `scripts/`:
+The VCC API has no applet data, so the skill reads every applet's editor page through the portal login, then analyses that offline. Three scripts in `scripts/`:
 
-- `scan_applets.py <account> [--fresh]` saves every applet of every plan in `exports/<account>/applet-scan/` (one `<plan name>.json` per plan, plus `manifest.json`; plans whose names clash get ` [<plan ID>]` appended, and renamed plans are followed through the ID stored in each file). No audio is downloaded. It resumes where it stopped; `--fresh` starts over.
+- `scan_applets.py <account> [--fresh]` saves every applet of every plan in `exports/<account>/applet-scan/` (one `<plan name>.json` per plan, plus `manifest.json`; plans whose names clash get ` [<plan ID>]` appended, and renamed plans are followed through the ID stored in each file). No audio is downloaded. It resumes where it stopped. `--fresh` starts over and keeps a complete previous scan in `exports/<account>/applet-scan-previous` (replacing the one there); an incomplete scan is discarded, never kept as the previous one.
 - `ds_usage.py <account> "Name" ...` reports, for each data source, the applets that SET it, READ it, or mention it in a field it doesn't classify (OTHER). Names aren't case-sensitive, like in VCC. `--like "text"` matches every data source whose name contains the text. `--all` gives one line per data source with set and read counts.
+- `compare_scans.py <account>` shows what changed between `applet-scan-previous` and `applet-scan`: plans and applets added, removed or renamed, and each changed field with its old and new value. Lists of simple entries (Set Data Source keys, response mappings) are compared as sets, long texts (web service definitions) line by line. The data source and next-applet dropdowns are ignored, and secret values are never shown. `--old DIR --new DIR` compares other scan folders.
 
 ## 1. Check the account and the scan
 
@@ -21,6 +22,7 @@ Then read `exports/<account>/applet-scan/manifest.json`, if it exists:
 - `finished` is today: use the scan, and say when it was made.
 - `finished` is missing: the last scan stopped. Run `scan_applets.py <account>` without `--fresh`, which resumes it.
 - Older than today: ask, giving the date: "The last scan of **<account>** is from <date>. Use it, or scan again (about 10 s per plan)?" A new scan uses `--fresh`.
+- The user says they changed the account's plans since the scan: scan again with `--fresh`, whatever the date. Then compare the scans (step 5) unless the user doesn't want it.
 - No manifest: scan.
 
 Before scanning, check the login with `.venv/Scripts/vccflow.exe session -a <account>`. If it has expired or is missing, ask, naming the account: "The portal login for **<account>** has expired. Do you want to log in to **<account>** now?" On yes, run `.venv/Scripts/vccflow.exe login -a <account>` with a 320000 ms timeout. On no, stop.
@@ -77,9 +79,21 @@ When several data sources follow the same pattern (e.g. "Set Failure …" applet
 
 **Closing:** the scan covers Interaction Plan applets only. Reads outside them aren't visible: agent desktop (ContactPad, Salesforce screen pop), reporting, interaction data exports. Offer one useful next step, such as tracing a data source a setter copies, or running the same check on the account's Test or PROD counterpart.
 
+## 5. Compare with the previous scan
+
+Run it when the user asks what changed, or after a `--fresh` scan the user asked for because they changed the plans:
+
+```
+.venv/Scripts/python.exe .claude/skills/data-source-usage/scripts/compare_scans.py <account>
+```
+
+Check the `OLD` and `NEW` header lines: both scans must be complete. If there is no previous scan, say so: the first `--fresh` scan after this change creates it.
+
+Report the changes in a table: Plan | Applet | Change, grouped when the same change was made in several plans (e.g. "`Salesforce Error Response` → `SF Error Response`" in seven Set Failure applets). Say plainly what each change means, e.g. "the failure exit, empty before, now goes to …". Use the script's lines exactly; don't add changes it doesn't show. Then run the data source analysis the user asked for on the new scan, and say which findings of earlier reports the changes resolved.
+
 ## Rules
 
 - Never print credentials. The scan holds Data Connector settings with secrets; the script hides excerpts from secret fields. Don't open or quote scan files beyond what the script prints.
-- `exports/` is git-ignored: the scan stays there, private. Don't copy it elsewhere.
+- `exports/` is git-ignored: the scans (`applet-scan`, `applet-scan-previous`) stay there, private. Don't copy them elsewhere.
 - Report plan, applet and data source names as they are.
 - Comparing two accounts: run the analysis for each and report where they differ.
