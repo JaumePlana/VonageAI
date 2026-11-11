@@ -80,6 +80,16 @@ def cmd_list_callback_numbers(args: argparse.Namespace) -> None:
     _print_json(PortalClient(load_account(args.account, Path(args.config))).list_callback_numbers())
 
 
+def cmd_list_data_sources(args: argparse.Namespace) -> None:
+    """The account's data source names, sorted as VCC treats them: not case-sensitive."""
+    names = PortalClient(load_account(args.account, Path(args.config))).list_data_sources(args.plan)
+    if names is None:
+        raise SystemExit(f"No Announcer, Set Data Source or Data Connector in '{args.account}' to read the list from.")
+    likes = [s.lower() for s in args.like or []]
+    names = [n for n in names if not likes or any(s in n.lower() for s in likes)]
+    _print_json(sorted(names, key=lambda n: (n.lower(), n)))
+
+
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
     portal = PortalClient(load_account(args.account, Path(args.config)))
     saved = portal.rename_callback_number(args.number, args.name)
@@ -306,6 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_list_mappings)
     with_account(sub.add_parser("list-callback-numbers", help="list callback numbers (portal)")).set_defaults(
         func=cmd_list_callback_numbers)
+    p = with_account(sub.add_parser("list-data-sources", aliases=["list-datasources"],
+                                    help="list the account's data source names (portal)"))
+    p.add_argument("--like", action="append", help="only names containing this text, not case-sensitive (repeatable)")
+    p.add_argument("--plan", help="plan ID to read the list from first (default: the first plan with a suitable applet)")
+    p.set_defaults(func=cmd_list_data_sources)
     p = with_account(sub.add_parser("rename-callback-number", help="rename a callback number (portal, writes)"))
     p.add_argument("number", help="the callback number, its ID or its current name")
     p.add_argument("name", help="new name, up to 50 characters")

@@ -4,7 +4,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 
 ## Resume here (end of 2026-11-02)
 
-**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Lists: plans, mappings, destinations, callback numbers (and rename). 105 tests pass. Details are in the log below.
+**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Lists: plans, mappings, destinations, callback numbers (and rename), data sources (`list-data-sources`, alias `list-datasources`, `--like` filter). 107 tests pass. Details are in the log below.
 
 **Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`, `/data-source-usage` (where data sources are set and read, across all plans; scan cached in `exports/<account>/applet-scan/`).
 
