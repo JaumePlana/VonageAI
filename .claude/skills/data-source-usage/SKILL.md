@@ -40,7 +40,9 @@ Run it in the background: a large account takes 15 minutes or more. Tell the use
 ```
 
 - Check the `SCAN` and `APPLETS` header lines: the scan must be complete. List any `UNREADABLE` applets in the report: they weren't searched.
-- `NOT FOUND` for a name: run again with `--like` and a distinctive part of the name, to find other spellings, and tell the user which names exist. Do the same when the names suggest variants (e.g. "SF …" and "Salesforce …").
+- `NOT FOUND` for a name: run again with `--like` and a distinctive part of the name, to find other spellings, and tell the user which names exist. Do the same when the names suggest variants (e.g. "SF …" and "Salesforce …"). Pass names exactly as the user gave them, leading and trailing spaces included: a leading space usually means the user is after a name that starts with one, so `--like " failure"` finds `" Failure Case Lookup"`.
+- Names are printed in quotes and kept exactly as stored, so `" X"` and `"X"` are reported apart. `>> the name has leading or trailing spaces` and `>> SAME NAME BUT FOR SPACES` are findings: always report them, quoting the names so the spaces show. A name set with a space and read without it (or the other way round) may never match. Whether VCC ignores those spaces is not confirmed, so present it as a likely bug to check, not as proof.
+- Next-applet fields are already left out, so an applet named like a data source doesn't produce OTHER rows.
 - Use the script's rows and counts exactly. Don't recount or estimate.
 
 **OTHER rows** need a judgement from the field name. Known fields:
@@ -69,6 +71,7 @@ When several data sources follow the same pattern (e.g. "Set Failure …" applet
 
 **Observations:** only what the data shows, most important first:
 - Set but never read, or read but never set. For read-but-never-set, it may be a system data source (CallGuid, DialledNumber…), set by a Bot Connector, passed in by a plan transfer, or missing.
+- Names with leading or trailing spaces, and the same name under two spellings that differ only by spaces: where each is set and read.
 - The same purpose under different names, and which plans use which.
 - An applet that behaves differently from the others of the same pattern, e.g. a different next applet.
 

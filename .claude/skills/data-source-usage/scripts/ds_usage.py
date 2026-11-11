@@ -12,7 +12,12 @@ Roles:
         data source, Salesforce match or field value.
   OTHER the name appears in a field this script doesn't know (e.g. Skill Tagger, Bot Connector
         settings): read the field name and decide.
-The editors' dropdown lists (every data source of the account) are ignored.
+The editors' dropdown lists (every data source of the account) are ignored, and so are
+references to applets (next-applet fields), even when an applet has a data source's name.
+
+Names are kept exactly as stored, spaces included, and shown in quotes: " X" and "X" are
+reported apart. A name that differs from a requested one only by leading or trailing spaces
+is still found, and flagged: it is most likely a typo for the same data source.
 """
 
 from __future__ import annotations
@@ -32,6 +37,20 @@ XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)<
 DROPDOWNS = re.compile(r"MetabaseDetails\[|MetabaseEntries|metabaseEntries|options\[|^state\.metadata")
 SECRET = re.compile(r"secret|password|token|apikey|api_key|authori|credential", re.I)
 VA_OUTPUT = re.compile(r"VirtualAssistantParamsToDataSourcesMapping\[\d+\]\.Destination$")
+# Fields that name an applet (where to go next, the applet itself), never a data source.
+APPLET_FIELD = re.compile(r"NextApplet|PossibleNextApplets|FormattedNextApplets|AppletName$|currentApplet|"
+                          r"Url$|RouteToApplet|(^|\.)Applet\d*$|defaultapplet|DefaultAppletInstanceName", re.I)
+DS_FIELD = re.compile(r"DataSource|\.Key$|Destination|Item1$", re.I)
+APPLET_LABEL = re.compile(r"^(.*) \([^()]*\)$")  # "Name (Applet Type)" in next-applet pickers
+
+
+def show(name: str) -> str:
+    """The name in quotes, so leading and trailing spaces are visible."""
+    return f'"{name}"'
+
+
+def spaced(name: str) -> bool:
+    return name != name.strip()
 
 
 def walk(v, path=""):
@@ -58,7 +77,7 @@ def excerpt(path: str, text: str, needle: str) -> str:
 
 
 def references(applet: dict) -> list[dict]:
-    """Every data source the applet sets or reads: {name, role, detail, path}."""
+    """Every data source the applet sets or reads: {name, role, detail, paths}. Names as stored."""
     body = {k: v for k, v in applet.items() if k in ("state", "dc", "form")}
     props = (body.get("state") or {}).get("appletProperties") or {}
     model = (body.get("dc") or {}).get("model") or {}
@@ -67,7 +86,7 @@ def references(applet: dict) -> list[dict]:
 
     def add(name, role, detail, path):
         if isinstance(name, str) and name.strip():
-            found.append({"name": name.strip(), "role": role, "detail": detail, "paths": [path]})
+            found.append({"name": name, "role": role, "detail": detail, "paths": [path]})
 
     for i, ds in enumerate(props.get("DataSources") or []):
         add(ds.get("Key"), "SET", f"= {ds.get('Value')!r}", f"state.appletProperties.DataSources[{i}].Key")
@@ -107,7 +126,7 @@ def references(applet: dict) -> list[dict]:
                 m = re.match(r"DataSources\[(\d+)\]\.Value$", where)
                 if m:
                     key = (props.get("DataSources") or [])[int(m.group(1))].get("Key")
-                    where = f"value of {key!r}"
+                    where = f"value of {show(key or '')}"
                 add(name, "READ", f"$({name}) in {where}: {excerpt(path, v, f'$({name})')}", path)
         for name in XML_DESTINATION.findall(v):
             add(name, "SET", "web service response <Destination>", path)
@@ -130,14 +149,26 @@ def references(applet: dict) -> list[dict]:
     return list(merged.values())
 
 
-def other_hits(applet: dict, match, known_paths: set[str]) -> list[dict]:
-    """The name in a field references() doesn't classify."""
+def applet_reference(path: str, value: str, applet_names: set[str]) -> bool:
+    """The field points to an applet, not to a data source."""
+    if APPLET_FIELD.search(path):
+        return True
+    v = value.strip().lower()
+    label = APPLET_LABEL.match(value.strip())
+    names_applet = v in applet_names or bool(label and label.group(1).strip().lower() in applet_names)
+    return names_applet and not DS_FIELD.search(path)
+
+
+def other_hits(applet: dict, match, known_paths: set[str], applet_names: set[str]) -> list[dict]:
+    """The name in a field references() doesn't classify (applet references left out)."""
     body = {k: v for k, v in applet.items() if k in ("state", "dc", "form")}
     hits = []
     for path, v in walk(body):
+        if not isinstance(v, str) or DROPDOWNS.search(path) or not match(v):
+            continue
         known = any(path == k or path.startswith(k + "[") or path.startswith(k + ".") for k in known_paths)
-        if isinstance(v, str) and not known and not DROPDOWNS.search(path) and match(v):
-            hits.append({"name": v.strip() if len(v) < 80 else v[:80], "role": "OTHER",
+        if not known and not applet_reference(path, v, applet_names):
+            hits.append({"name": v if len(v) < 80 else v[:80], "role": "OTHER",
                          "detail": f"in field {field(path)}: {excerpt(path, v, v.strip()[:40])}", "paths": [path]})
     return hits
 
@@ -155,6 +186,14 @@ def links(plan_applets: list[dict], applet: dict) -> tuple[list[str], list[str]]
     nxt = sorted(pointed(applet) - {me})
     prev = sorted(a["listing"]["name"] for a in plan_applets if a is not applet and me in pointed(a))
     return prev, nxt
+
+
+def spacing_variants(keys) -> list[list[str]]:
+    """Groups of names that are equal once leading and trailing spaces are removed."""
+    groups = defaultdict(set)
+    for key in keys:
+        groups[key.strip()].add(key)
+    return sorted(sorted(g) for g in groups.values() if len(g) > 1)
 
 
 def load_scan(account: str) -> tuple[dict, list[dict]]:
@@ -189,21 +228,24 @@ def main() -> int:
         print(f"  UNREADABLE: {pn} | {an}")
 
     exact = {n.lower() for n in args.names}
+    trimmed = {n.strip().lower() for n in args.names}
     likes = [s.lower() for s in args.like]
 
     def match(name: str) -> bool:
-        n = name.strip().lower()
-        return n in exact or any(s in n for s in likes)
+        """Exact (spaces count), equal once trimmed (flagged in the report), or containing a --like text."""
+        n = name.lower()
+        return n in exact or n.strip() in trimmed or any(s in n for s in likes)
 
-    rows = defaultdict(list)  # data source (lower) -> rows
+    rows = defaultdict(list)  # data source (lower case, spaces kept) -> rows
     spellings = defaultdict(set)
     for p in plans:
         pn = p["plan"]["interactionPlanName"]
+        applet_names = {b["listing"]["name"].strip().lower() for b in p["applets"]}
         for a in p["applets"]:
             refs = references(a)
             hits = [r for r in refs if args.all or match(r["name"])]
             if not args.all:
-                hits += other_hits(a, match, {x for r in refs for x in r["paths"]})
+                hits += other_hits(a, match, {x for r in refs for x in r["paths"]}, applet_names)
             if not hits:
                 continue
             prev, nxt = ([], []) if args.all else links(p["applets"], a)
@@ -215,19 +257,33 @@ def main() -> int:
 
     if args.all:
         print("\nDATA SOURCE | set by applets | read by applets | plans")
-        for key in sorted(rows):
+        for key in sorted(rows, key=lambda k: (k.strip(), k)):
             rs = rows[key]
             s = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "SET"})
             g = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "READ"})
             flag = "  SET-NEVER-READ" if s and not g else "  READ-NEVER-SET" if g and not s else ""
-            print(f"{' / '.join(sorted(spellings[key]))} | {s} | {g} | {len({r['plan'] for r in rs})}{flag}")
+            if spaced(key):
+                flag += "  SPACES"
+            print(f"{' / '.join(show(n) for n in sorted(spellings[key]))} | {s} | {g} | "
+                  f"{len({r['plan'] for r in rs})}{flag}")
+        variants = spacing_variants(rows)
+        if variants:
+            print("\nSAME NAME BUT FOR SPACES (probably one data source under two spellings):")
+            for v in variants:
+                print("  " + " / ".join(show(s) for k in v for s in sorted(spellings[k])))
         return 0
 
-    for n in sorted(exact - set(rows)):
-        print(f"\nNOT FOUND: no applet sets or reads '{n}'")
-    for key in sorted(rows):
+    for n in sorted(args.names, key=str.lower):
+        if not any(k.strip() == n.strip().lower() for k in rows):
+            print(f"\nNOT FOUND: no applet sets or reads {show(n)}")
+    for key in sorted(rows, key=lambda k: (k.strip(), k)):
         rs = rows[key]
-        print(f"\n=== {' / '.join(sorted(spellings[key]))}")
+        print(f"\n=== {' / '.join(show(n) for n in sorted(spellings[key]))}")
+        if spaced(key):
+            print("  >> the name has leading or trailing spaces")
+        if key not in exact and key.strip() in trimmed:
+            asked = ", ".join(show(n) for n in args.names if n.strip().lower() == key.strip())
+            print(f"  >> differs from the requested {asked} only by leading or trailing spaces")
         for role in ("SET", "READ", "OTHER"):
             group = [r for r in rs if r["role"] == role]
             applets = {(r["plan"], r["applet"]) for r in group}
@@ -240,6 +296,9 @@ def main() -> int:
             print("  >> SET but never READ in any plan")
         if not any(r["role"] == "SET" for r in rs):
             print("  >> READ but never SET in any plan (system data source, set elsewhere, or missing)")
+    for v in spacing_variants(rows):
+        print(f"\n>> SAME NAME BUT FOR SPACES: {' / '.join(show(s) for k in v for s in sorted(spellings[k]))}: probably one data source "
+              f"under two spellings; compare where each is set and read")
     return 0
 
 

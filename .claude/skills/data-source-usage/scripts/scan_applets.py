@@ -121,7 +121,7 @@ def main() -> int:
     portal = PortalClient(account)
     plans = portal.list_plans()
     manifest["plans"] = len(plans)
-    manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"{len(plans)} plans in '{args.account}'", flush=True)
 
     files = plan_filenames(plans)
@@ -138,13 +138,13 @@ def main() -> int:
         unreadable += bad
         tmp = target.with_name(target.name + ".part")  # renamed when complete: no half-written plan files
         tmp.write_text(json.dumps({"plan": plan, "scannedAt": now(), "applets": applets},
-                                  ensure_ascii=False), encoding="utf-8")
+                                  indent=2, ensure_ascii=False), encoding="utf-8")  # as export-plan writes plan.json
         tmp.replace(target)
         note = f", {bad} unreadable" if bad else ""
         print(f"[{i}/{len(plans)}] {plan['interactionPlanName']}: {len(applets)} applets{note}", flush=True)
 
     manifest["finished"] = now()
-    manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"DONE: {len(plans)} plans saved in {out}" + (f", {unreadable} unreadable applets" if unreadable else ""))
     return 0
 
