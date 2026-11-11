@@ -161,6 +161,16 @@ def main() -> int:
         print(f"{label}: {len(plans)}/{m.get('plans')} plans, {status}, started {m.get('started')}, "
               f"finished {m.get('finished')}")
 
+    # The account's data source list, saved once per scan by scan_applets.py
+    ods, nds = om.get("dataSources"), nm.get("dataSources")
+    if ods is None or nds is None:
+        print("\nDATA SOURCES: not compared (a scan has no list; run scan_applets.py --compact on it)")
+    else:
+        for n in sorted(set(ods) - set(nds), key=str.lower):
+            print(f'\nDATA SOURCE REMOVED from the account: "{n}"')
+        for n in sorted(set(nds) - set(ods), key=str.lower):
+            print(f'\nDATA SOURCE ADDED to the account: "{n}"')
+
     for pid in sorted(set(old) - set(new), key=lambda p: name(old[p]).lower()):
         print(f"\nPLAN REMOVED: {name(old[pid])} ({len(old[pid]['applets'])} applets)")
     for pid in sorted(set(new) - set(old), key=lambda p: name(new[p]).lower()):
@@ -174,6 +184,9 @@ def main() -> int:
             print("\n".join(lines))
     print(f"\nSUMMARY: {len(old)} plans before, {len(new)} after; {len(set(new) - set(old))} added, "
           f"{len(set(old) - set(new))} removed, {changed} changed")
+    if ods is not None and nds is not None:
+        print(f"DATA SOURCES: {len(ods)} before, {len(nds)} after; {len(set(nds) - set(ods))} added, "
+              f"{len(set(ods) - set(nds))} removed")
     return 0
 
 

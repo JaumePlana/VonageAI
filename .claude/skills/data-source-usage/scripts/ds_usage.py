@@ -223,6 +223,7 @@ def main() -> int:
         ap.error("give names, --like or --all")
 
     manifest, plans = load_scan(args.account)
+    account_list = manifest.get("dataSources")  # saved once per scan by scan_applets.py
     unreadable = [(p["plan"]["interactionPlanName"], a["listing"]["name"]) for p in plans
                   for a in p["applets"] if "formError" in a]
     status = "complete" if manifest.get("finished") else "INCOMPLETE (scan did not finish)"
@@ -276,11 +277,22 @@ def main() -> int:
             print("\nSAME NAME BUT FOR SPACES (probably one data source under two spellings):")
             for v in variants:
                 print("  " + " / ".join(show(s) for k in v for s in sorted(spellings[k])))
+        if account_list is not None:
+            unused = [n for n in account_list if n.lower() not in rows]
+            print(f"\nIN THE ACCOUNT BUT NO APPLET SETS OR READS THEM ({len(unused)} of {len(account_list)}):")
+            for n in unused:
+                print("  " + show(n))
         return 0
 
     for n in sorted(args.names, key=str.lower):
         if not any(k.strip() == n.strip().lower() for k in rows):
-            print(f"\nNOT FOUND: no applet sets or reads {show(n)}")
+            if account_list is None:
+                where = ""
+            elif n.lower() in {x.lower() for x in account_list}:
+                where = ": it exists in the account's data source list, unused by the plans"
+            else:
+                where = ": it isn't in the account's data source list either"
+            print(f"\nNOT FOUND: no applet sets or reads {show(n)}{where}")
     for key in sorted(rows, key=lambda k: (k.strip(), k)):
         rs = rows[key]
         print(f"\n=== {' / '.join(show(n) for n in sorted(spellings[key]))}")

@@ -10,6 +10,11 @@ continues where it left off. --fresh starts over: a complete previous scan is mo
 exports/<account>/applet-scan-previous (replacing the one there), so compare_scans.py can
 show what changed; an incomplete one is discarded.
 
+The editor pages' catalogs of possible values (data source lists, next-applet pickers,
+Salesforce object and field lists, form definitions) are left out; the account's data
+source list is saved once, in manifest.json ("dataSources"). --compact removes the catalogs
+from scans saved before this, offline.
+
 No audio is downloaded and nothing is changed in VCC. The files hold Data Connector
 settings, credentials included: exports/ is git-ignored, keep it private.
 """
@@ -29,6 +34,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from vccflow.config import load_account
+from vccflow.export import DC_SUB_NOT_CONFIG
 from vccflow.portal import PortalClient, PortalError, SessionExpired
 
 
@@ -57,6 +63,71 @@ def read_applet(portal: PortalClient, plan_id: str, applet: dict) -> dict:
         except PortalError as e2:
             entry["formError"] = str(e2)
     return entry
+
+
+# The editor pages carry catalogs of possible values (every data source of the account,
+# every applet of the plan for the next-applet pickers, Salesforce objects and fields, the
+# page's form definition). They aren't the applet's configuration, are the same in every
+# applet, and made up ~95% of a scan. The applet's own values are all kept. TemplateGroups
+# (Data Connector response mappings) is kept: the analysis needs it, unlike export-plan.
+STATE_CATALOGS = {"metadata", "dataSourceKeys"}
+DC_CATALOGS = {"MetabaseEntries", "PossibleNextApplets", "FormattedNextApplets", "MatchObjectNames",
+               "CrmFields", "FilterableCrmFields"}
+DC_SUB_CATALOGS = DC_SUB_NOT_CONFIG  # lookup lists inside the Salesforce sub-models, as export-plan
+
+
+def data_source_list(entry: dict) -> list[str] | None:
+    """The account's data source names, as an applet page lists them (None if it doesn't)."""
+    entries = ((entry.get("state") or {}).get("dataSourceKeys") or {}).get("metabaseEntries")
+    if entries is None:
+        entries = ((entry.get("dc") or {}).get("model") or {}).get("MetabaseEntries")
+    return sorted(entries, key=lambda n: (n.lower(), n)) if entries is not None else None
+
+
+def compact(entry: dict) -> dict:
+    """The applet without the editor's catalogs of possible values."""
+    out = dict(entry)
+    if isinstance(out.get("state"), dict):
+        out["state"] = {k: v for k, v in out["state"].items() if k not in STATE_CATALOGS}
+    if isinstance(out.get("dc"), dict) and isinstance(out["dc"].get("model"), dict):
+        model = {}
+        for k, v in out["dc"]["model"].items():
+            if k in DC_CATALOGS:
+                continue
+            model[k] = {s: x for s, x in v.items() if s not in DC_SUB_CATALOGS} if isinstance(v, dict) else v
+        out["dc"] = {**out["dc"], "model": model}
+    return out
+
+
+def write_json(target: Path, doc: dict) -> None:
+    """Indented like export-plan's plan.json; renamed when complete, so no half-written files."""
+    tmp = target.with_name(target.name + ".part")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
+
+
+def compact_saved(folder: Path) -> None:
+    """Remove the catalogs from a scan saved before they were left out (offline)."""
+    manifest_file = folder / "manifest.json"
+    if not manifest_file.exists():
+        return
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    before = after = 0
+    for f in sorted(folder.glob("*.json")):
+        if f.name == "manifest.json":
+            continue
+        doc = json.loads(f.read_text(encoding="utf-8"))
+        if manifest.get("dataSources") is None:
+            for a in doc["applets"]:
+                if (names := data_source_list(a)) is not None:
+                    manifest["dataSources"] = names
+                    break
+        before += f.stat().st_size
+        doc["applets"] = [compact(a) for a in doc["applets"]]
+        write_json(f, doc)
+        after += f.stat().st_size
+    write_json(manifest_file, manifest)
+    print(f"{folder}: {before // 2**20} MB -> {after // 2**20} MB", flush=True)
 
 
 def plan_filenames(plans: list[dict]) -> dict[str, str]:
@@ -136,7 +207,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("account")
     ap.add_argument("--fresh", action="store_true", help="start over, keeping a complete previous scan in applet-scan-previous")
+    ap.add_argument("--compact", action="store_true",
+                    help="offline: remove the editor catalogs from scans saved before they were left out")
     args = ap.parse_args()
+
+    if args.compact:
+        for folder in ("applet-scan", "applet-scan-previous"):
+            compact_saved(Path("exports") / args.account / folder)
+        return 0
 
     load_dotenv(".env")
     account = load_account(args.account, Path("accounts.toml"))
@@ -168,10 +246,13 @@ def main() -> int:
         applets = [read_applet(portal, pid, a) for a in portal.list_applets(pid).get("applets", [])]
         bad = sum(1 for a in applets if "formError" in a)
         unreadable += bad
-        tmp = target.with_name(target.name + ".part")  # renamed when complete: no half-written plan files
-        tmp.write_text(json.dumps({"plan": plan, "scannedAt": now(), "applets": applets},
-                                  indent=2, ensure_ascii=False), encoding="utf-8")  # as export-plan writes plan.json
-        tmp.replace(target)
+        if manifest.get("dataSources") is None:  # the account's list, saved once instead of per applet
+            for a in applets:
+                if (names := data_source_list(a)) is not None:
+                    manifest["dataSources"] = names
+                    write_json(manifest_file, manifest)
+                    break
+        write_json(target, {"plan": plan, "scannedAt": now(), "applets": [compact(a) for a in applets]})
         note = f", {bad} unreadable" if bad else ""
         print(f"[{i}/{len(plans)}] {plan['interactionPlanName']}: {len(applets)} applets{note}", flush=True)
 
