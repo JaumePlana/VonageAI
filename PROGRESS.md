@@ -2,20 +2,28 @@
 
 Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](README.md).
 
-## Resume here (end of 2026-11-02)
+## Resume here (end of 2026-11-11)
 
-**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Lists: plans, mappings, destinations, callback numbers (and rename), data sources (`list-data-sources`, alias `list-datasources`, `--like` filter). 107 tests pass. Details are in the log below.
+**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector and Menu applets. Lists: plans, mappings, destinations, callback numbers (and rename), data sources (`list-data-sources`, alias `list-datasources`, `--like` filter). Data source usage across all plans of an account, with scan comparison (skill `/data-source-usage`). 107 tests pass. Details are in the log below.
 
-**Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`, `/data-source-usage` (where data sources are set and read, across all plans; scan cached in `exports/<account>/applet-scan/`).
+**Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`, `/data-source-usage` (where data sources are set and read, across all plans; rescans and shows what changed since the previous scan).
 
 **Rules that shape the code:**
 - `portal_account` is mandatory per account. A missing one, or a login signed in to another account, gets its saved login removed. vccflow never logs out of VCC: that ends the user's other sessions.
 - Copying needs only `region`, `portal_account`, a login, and `allow_portal_writes` on the target. API credentials are optional, and give the reporting group and an extra cross-check.
 - Plan-level settings (reporting group, Outbound CLID) are exported and compared, not copied. The user cannot change the Outbound CLID in the current UI, so vccflow only reports it. A POST on the plan might update it: not tried, by the user's decision.
 
-**State in VCC:** Demo29 "POC Test" holds a full copy of JPlana "DISH Web Services" (15 applets). Empty it before copying into it again. Portal logins expire: `vccflow login -a <account>`.
+**State in VCC:** Demo29 "POC Test" holds a full copy of JPlana "DISH Web Services" (15 applets). Empty it before copying into it again. Portal logins expire: `vccflow login -a <account>` (both Viessmann logins had expired at the end of 2026-11-11).
+
+**Viessmann error handling (user's changes, 2026-11-11, Test and PROD):** every Data Connector that writes `error` (12 per account) has its failure exits on a "Set Failure …" Set Data Source that sets `"SF Error Response"` = `$(error)`. `"Salesforce Error Response"`, `Vonage_error` and `" Failure Case Lookup"` (leading space) are gone from PROD. Scans of both accounts from that day are in `exports/<account>/applet-scan/` (PROD also `applet-scan-previous`, before the user's PROD changes).
 
 **Next steps, for the user to choose:**
+0. Viessmann findings (from 2026-11-11), for information only: no action until the customer asks to harmonize Test and PROD. Don't offer them as follow-ups before then.
+   - Test: the "Get Salesforce Access Token" connectors in CORE Function: Get Callback Data / Get existing Case / Get Quote Data still have an empty "failure" exit (fixed in PROD).
+   - PROD: CORE Function: Get existing Case keeps the old connector `Get Existing Case`, which nothing leads to; its failure exit also goes to Set Failure Get Existing Case.
+   - Test, possible bug: in CORE Function: Create Callback Case, `Set DE Sales Voice` sets `"CallbackAnnouncement "` (trailing space) and `"CallbackFailureAnnouncement "`, while the Announcer reads `"CallbackAnnouncement"`. Not confirmed whether VCC trims spaces.
+   - Test: failure flags with a trailing space: `"Failure Update VC Callback Data OOO "`, `"Failure Update VC with Service Contract Data "`.
+   - `"SF Error Response"` is set in 11 plans but read by none: confirm with the customer whether something outside the plans (agent desktop, reporting) uses it.
 1. Offered: compare `ifm-prod` with `ifm-test` for the plans whose CLID is not a callback number.
 2. Offered: make `compare-plans` easier to read (plan-level differences first, the rest grouped by applet). Viessmann Test vs PROD "DE Sales Voice" lists 744 differences, not analysed; applet types compared only through page fields probably inflate that.
 3. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Data Router, Collect Input...). The skill hasn't had its first real run yet. `--skip-unsupported` copies the rest meanwhile.
@@ -26,7 +34,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 - Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors. Copies in zz Claude POC and Demo29 POC Test carry them too.
 - Tell the IFM owner about the 4 `ifm-prod` plans whose CLID is not a callback number (run `/outbound-clid-summary ifm-prod` for the list).
 - Where do `Contact Language`, `Contact Role`, `CustomerReference` and `JavascriptEngineUrl` come from? JPlana does not list them either.
-- `exports/` holds HARs and exports with credentials and cookies: git-ignored, keep private.
+- `exports/` holds HARs, exports and applet scans with credentials and cookies: git-ignored, keep private.
 
 ## Status (2026-10-28)
 
@@ -108,4 +116,10 @@ Recorded in the "DISH Web Services" plan (`e9d0c8ab-…`). That plan is **not** 
 - [x] Callback numbers (2026-11-02, `exports/HAR/callbackNumbers.har`): **no API**. All on the classic page `CallCentre/userAdmin/system-settings.aspx` (`mainForm`, multipart, `__VIEWSTATE`). The list is the `SelectedClidNumber` dropdown (`name - number`, value = ID), the same as the CSV behind `DownloadClidButton` (`Clid,Name,NewName`). Rename posts `SelectedClidNumber`, `SelectedClidName`, `UpdateClidName=Update` **with all other settings on the page**, so `rename_callback_number` posts the fields as the browser would, then checks the confirmation message, the name, and that no other setting moved. Live rename tested in JPlana (`+34919033039` to "vccflow test" and back, 2026-11-02): the name changed and no other setting moved. The file upload (`UploadClidButton`) is not implemented. The CLID summary checks that each InteractionPlanClid number is a callback number.
 - [x] Plan-level Outbound CLID in export and comparison: `plan.outboundClidBehaviour`, `plan.outboundClid` in `plan.json`, read from the Interaction Manager API (the portal login's token without API credentials, which also gives those accounts the reporting group). `compare-plans` and `compare-exports` report a different setting as a difference, and a different number as a note across accounts, or a difference within one. Older exports get a "not compared" note. Reporting only.
 - [x] **Live Menu test passed** (2026-11-02): `copy-plan --from JPlana --to Demo29 "DISH Web Services" "POC Test"` copied all 15 applets, 2 WAVs and the initial applet. Read-back matches (one case-only note: `VoiceCall|Id`). "MNU Example" checked directly: 11 choices, timeout applet, failure applet (new ID and GUID resolve to the same applet by name), Timeout and TimeoutCount identical. That Menu is text-to-speech with a fixed voice, so a Menu with uploaded audio or a dynamic voice is covered by unit tests only.
+- [x] **Data source usage** (2026-11-11, skill `/data-source-usage`, scripts in `.claude/skills/data-source-usage/scripts/`). The API has no applet data, so the skill reads every applet's editor page through the portal login (about 10 s per plan, read-only):
+  - `scan_applets.py <account> [--fresh | --compact]` saves one `<plan name>.json` per plan in `exports/<account>/applet-scan/` (plan ID inside, so renamed plans are followed; clashing names get ` [<id>]`), indented like `plan.json`, and resumes after an expired login. The editor catalogs (data source lists, next-applet pickers `PossibleNextApplets`/`FormattedNextApplets`, `MatchObjectNames`, `CrmFields`, `state.metadata`) are left out: ~99% of the size (624 MB → 5.8 MB for Viessmann Test). The account's data source list is saved once, as `dataSources` in `manifest.json`. `--fresh` moves a complete scan to `applet-scan-previous` and empties the folder rather than deleting it (Windows refused while OneDrive or the editor held it).
+  - `ds_usage.py <account> "Name" … | --like TEXT | --all`: per data source, the applets that SET it (Set Data Source key, Data Connector response mapping / `<Destination>`, Salesforce get fields, Collect Input, Virtual Assistant output), READ it (`$(…)`, Data Router condition, Announcer/Menu data source, Salesforce match or field value) or mention it elsewhere (OTHER: e.g. Skill Tagger `AgentIdDataSource`, Bot Connector `AgentForce_*DataSourceName`), with the applets before and after (real next-applet fields only). Names keep their spaces and are flagged when they have leading/trailing ones or differ only by spaces. `--all` also lists the account's data sources no applet uses; `NOT FOUND` says whether the name exists in the account.
+  - `compare_scans.py <account>`: plans, applets and data sources added, removed or renamed, and each changed field (simple lists as sets, long texts line by line, secrets hidden).
+  - Lessons: a Data Connector's next-applet picker lists every applet of the plan, and its Salesforce field catalog can hold names equal to applet names; both gave false routes until left out. Only Web Service (REST) connectors write `error`; Salesforce token and "Update VC …" connectors don't, so `$(error)` after them would be empty or stale.
+- [x] `vccflow list-data-sources` (alias `list-datasources`, `--like`, `--plan`) (2026-11-11): the account's data source names, from an applet editor page (portal login).
 - [ ] Next: copy across accounts (Test → PROD). Check first that the target has the data sources, the Salesforce/Web Service connections and the other referenced items; nothing on PROD before a Test → Test run between two accounts.
