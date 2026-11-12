@@ -50,8 +50,21 @@ def show(name: str) -> str:
     return f'"{name}"'
 
 
-def spaced(name: str) -> bool:
-    return name != name.strip()
+def norm(name: str) -> str:
+    """The name without leading/trailing spaces and with single spaces between words (lower case)."""
+    return " ".join(name.split()).lower()
+
+
+def spacing(name: str) -> list[str]:
+    """What is wrong with the spaces of a name. VCC treats "X", " X" and "X  Y" as different data sources."""
+    issues = []
+    if name[:1].isspace():
+        issues.append("leading spaces")
+    if name[-1:].isspace():
+        issues.append("trailing spaces")
+    if re.search(r"\S\s{2,}\S", name):
+        issues.append("two or more spaces between words")
+    return issues
 
 
 def walk(v, path=""):
@@ -194,10 +207,10 @@ def links(plan_applets: list[dict], applet: dict) -> tuple[list[str], list[str]]
 
 
 def spacing_variants(keys) -> list[list[str]]:
-    """Groups of names that are equal once leading and trailing spaces are removed."""
+    """Groups of names that are equal but for leading, trailing or repeated spaces."""
     groups = defaultdict(set)
     for key in keys:
-        groups[key.strip()].add(key)
+        groups[norm(key)].add(key)
     return sorted(sorted(g) for g in groups.values() if len(g) > 1)
 
 
@@ -234,13 +247,13 @@ def main() -> int:
         print(f"  UNREADABLE: {pn} | {an}")
 
     exact = {n.lower() for n in args.names}
-    trimmed = {n.strip().lower() for n in args.names}
+    trimmed = {norm(n) for n in args.names}
     likes = [s.lower() for s in args.like]
 
     def match(name: str) -> bool:
-        """Exact (spaces count), equal once trimmed (flagged in the report), or containing a --like text."""
+        """Exact (spaces count), equal but for spaces (flagged in the report), or containing a --like text."""
         n = name.lower()
-        return n in exact or n.strip() in trimmed or any(s in n for s in likes)
+        return n in exact or norm(n) in trimmed or any(s in n for s in likes)
 
     rows = defaultdict(list)  # data source (lower case, spaces kept) -> rows
     spellings = defaultdict(set)
@@ -263,20 +276,28 @@ def main() -> int:
 
     if args.all:
         print("\nDATA SOURCE | set by applets | read by applets | plans")
-        for key in sorted(rows, key=lambda k: (k.strip(), k)):
+        for key in sorted(rows, key=lambda k: (norm(k), k)):
             rs = rows[key]
             s = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "SET"})
             g = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "READ"})
             flag = "  SET-NEVER-READ" if s and not g else "  READ-NEVER-SET" if g and not s else ""
-            if spaced(key):
+            if spacing(key):
                 flag += "  SPACES"
             print(f"{' / '.join(show(n) for n in sorted(spellings[key]))} | {s} | {g} | "
                   f"{len({r['plan'] for r in rs})}{flag}")
-        variants = spacing_variants(rows)
+        # Spacing problems among the names the plans use and the account's whole list
+        names = {n.lower(): n for n in (account_list or [])}
+        names.update({k: sorted(spellings[k])[0] for k in rows})
+        bad = sorted((n for n in names.values() if spacing(n)), key=lambda n: (norm(n), n))
+        print(f"\nNAMES WITH SPACING PROBLEMS ({len(bad)}; VCC treats them as different from the name without them):")
+        for n in bad:
+            where = "used by the plans" if n.lower() in rows else "in the account's list only, unused by the plans"
+            print(f"  {show(n)}: {', '.join(spacing(n))} ({where})")
+        variants = spacing_variants(names)
         if variants:
-            print("\nSAME NAME BUT FOR SPACES (probably one data source under two spellings):")
+            print("\nSAME NAME BUT FOR SPACES (two data sources where one was probably meant):")
             for v in variants:
-                print("  " + " / ".join(show(s) for k in v for s in sorted(spellings[k])))
+                print("  " + " / ".join(show(names[k]) for k in v))
         if account_list is not None:
             unused = [n for n in account_list if n.lower() not in rows]
             print(f"\nIN THE ACCOUNT BUT NO APPLET SETS OR READS THEM ({len(unused)} of {len(account_list)}):")
@@ -285,7 +306,7 @@ def main() -> int:
         return 0
 
     for n in sorted(args.names, key=str.lower):
-        if not any(k.strip() == n.strip().lower() for k in rows):
+        if not any(norm(k) == norm(n) for k in rows):
             if account_list is None:
                 where = ""
             elif n.lower() in {x.lower() for x in account_list}:
@@ -293,14 +314,14 @@ def main() -> int:
             else:
                 where = ": it isn't in the account's data source list either"
             print(f"\nNOT FOUND: no applet sets or reads {show(n)}{where}")
-    for key in sorted(rows, key=lambda k: (k.strip(), k)):
+    for key in sorted(rows, key=lambda k: (norm(k), k)):
         rs = rows[key]
         print(f"\n=== {' / '.join(show(n) for n in sorted(spellings[key]))}")
-        if spaced(key):
-            print("  >> the name has leading or trailing spaces")
-        if key not in exact and key.strip() in trimmed:
-            asked = ", ".join(show(n) for n in args.names if n.strip().lower() == key.strip())
-            print(f"  >> differs from the requested {asked} only by leading or trailing spaces")
+        if spacing(key):
+            print(f"  >> SPACES: the name has {', '.join(spacing(key))}; VCC treats it as a different data source")
+        if key not in exact and norm(key) in trimmed:
+            asked = ", ".join(show(n) for n in args.names if norm(n) == norm(key))
+            print(f"  >> differs from the requested {asked} only by spaces")
         for role in ("SET", "READ", "OTHER"):
             group = [r for r in rs if r["role"] == role]
             applets = {(r["plan"], r["applet"]) for r in group}
@@ -314,8 +335,8 @@ def main() -> int:
         if not any(r["role"] == "SET" for r in rs):
             print("  >> READ but never SET in any plan (system data source, set elsewhere, or missing)")
     for v in spacing_variants(rows):
-        print(f"\n>> SAME NAME BUT FOR SPACES: {' / '.join(show(s) for k in v for s in sorted(spellings[k]))}: probably one data source "
-              f"under two spellings; compare where each is set and read")
+        print(f"\n>> SAME NAME BUT FOR SPACES: {' / '.join(show(s) for k in v for s in sorted(spellings[k]))}: two data "
+              f"sources where one was probably meant; compare where each is set and read")
     return 0
 
 
