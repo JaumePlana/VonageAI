@@ -32,6 +32,17 @@ def test_web_service_form():
     ]
 
 
+def test_javascript_form():
+    # dataRouter4.har: "DC JavaScript" posts its provider, action, definition and the three outcomes.
+    form = data_connector_form(
+        {"DataProvider": "JavaScript", "Action": "CallWebService", "ApiInteractionDefinition": "<ApiInteraction/>"},
+        {"NextApplet": "DR Test"})
+    assert form == [
+        ("DataProvider", "JavaScript"), ("Action", "CallWebService"), ("ApiInteractionDefinition", "<ApiInteraction/>"),
+        ("NextApplet", "DR Test"), ("NextAppletFailure", ""), ("NextAppletInterfaceFailure", ""),
+    ]
+
+
 def test_no_next_applets_sends_empty_outcomes():
     # dcwithoutnextapplets.har: the page posts the three outcomes empty.
     form = dict(data_connector_form({"DataProvider": "WebService", "Action": "CallWebService"}, {}))

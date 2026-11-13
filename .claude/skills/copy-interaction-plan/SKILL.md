@@ -56,7 +56,7 @@ This exports the source plan to `exports/<source account>/plans/<plan>/` and cha
 | "is not supported for import yet" | List those applets and ask whether to copy the rest with `--skip-unsupported`. Say which paths would be left unset. Mention `/add-applet-type` for adding support. |
 | "points to ..., which is not in the plan" | The source has a broken path. Report it and ask how to proceed. |
 | "Expected one plan" | The plan name is wrong, or the target plan doesn't exist. vccflow doesn't create plans. |
-| WARNING about data sources | Doesn't stop the copy. Keep these for the final report. Add `--require-data-sources` only if the user asked to stop on missing ones. |
+| WARNING about data sources | Doesn't stop the copy: the copy sets them in the auxiliary Set Data Source `zz vccflow Aux Data Sources`, kept in the target plan (VCC drops a data source no applet sets, and refuses Data Router rules that use one). Keep these for the final report, with the NOTE naming the data sources it sets. Add `--require-data-sources` only if the user asked to stop on missing ones. |
 
 ## 5. Copy
 

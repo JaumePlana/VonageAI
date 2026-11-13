@@ -119,11 +119,12 @@ def test_created_versus_used_data_sources():
     soql = {"settings": {"Action": "GetSalesforceData",
                          "CrmRetrievalViewModel": {"UseRawSoql": True, "Soql": "SELECT Status, Id FROM Case LIMIT 1"}}}
     assert data_sources_created(sds) == {"LOG"} and data_sources_used(sds) == {"Case Country"}
-    assert data_sources_created(ws) == {"Language"} and data_sources_used(ws) == {"JavascriptEngineUrl"}
+    # $(JavascriptEngineUrl) is a Vonage keyword (JavaScript Data Connector), not a data source.
+    assert data_sources_created(ws) == {"Language"} and data_sources_used(ws) == set()
     assert data_sources_created(sf) == {"Case|Origin", "Case(1)|Origin", "Case(2)|Origin"}
     assert data_sources_created(soql) == {"Case|Status", "Case|Id"}
     reads_log = {"settings": {"Text": "$(LOG) $(Case|Origin)"}}
-    assert data_sources_needed([sds, ws, sf, reads_log]) == {"Case Country", "JavascriptEngineUrl", "CallGuid"}
+    assert data_sources_needed([sds, ws, sf, reads_log]) == {"Case Country", "CallGuid"}
 
 
 def test_menu_connections_go_into_next():

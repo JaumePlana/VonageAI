@@ -30,6 +30,10 @@ TEXTAREA = r'<textarea\b[^>]*\bname="{name}"[^>]*>(.*?)</textarea>'
 INPUT_VALUE = r'<input\b(?=[^>]*\bname="{name}")[^>]*\bvalue="([^"]*)"'
 VALIDATION_ERRORS = re.compile(r'class="(?:validation-summary-errors|field-validation-error)"[^>]*>(.*?)</(?:div|span)>', re.S)
 DC_NEXT_KEYS = ("NextApplet", "NextAppletFailure", "NextAppletInterfaceFailure", "NextAppletMultipleMatch")
+# Data Router (DataRouter page, an MVC form): rule data types, all recorded (dataRouter*.har).
+# 3 is True/False ("equals" only; its value is RightHandFixedBooleanValue).
+DR_RECORDED_TYPES = {0: "text", 1: "number", 2: "decimal", 3: "true/false", 4: "date"}
+DR_BOOLEAN = 3
 # The plan page (applications.asp) lists every plan; the second cell of the plan's row
 # links the initial applet, or says "WARNING initial applet not selected".
 INITIAL_APPLET = r'<tr id="{plan_id}">\s*<td\b[^>]*>.*?</td>\s*<td\b[^>]*>(.*?)</td>'
@@ -127,8 +131,8 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
     """Build the DataRetriever form post for a Data Connector, as the page sends it on "Update".
 
     settings are the exported page-model values (see export.py), nxt the NextApplet* names.
-    Covers the cases recorded so far: Web Service calls, and Salesforce get (match by CLID
-    or data source, raw SOQL, one or several records) and update.
+    Covers the cases recorded so far: Web Service calls, JavaScript (dataRouter4.har), and
+    Salesforce get (match by CLID or data source, raw SOQL, one or several records) and update.
     """
     provider, action = settings.get("DataProvider"), settings.get("Action")
     form = [("DataProvider", provider), ("Action", action)]
@@ -137,6 +141,8 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
             ("SerialisedTemplatePlaceholders", settings.get("SerialisedTemplatePlaceholders") or "[]"),
             ("ApiInteractionDefinition", settings.get("ApiInteractionDefinition") or ""),
         ]
+    elif provider == "JavaScript" and action == "CallWebService":
+        form += [("ApiInteractionDefinition", settings.get("ApiInteractionDefinition") or "")]
     elif provider == "Salesforce" and action == "GetSalesforceData":
         crm = settings.get("CrmRetrievalViewModel") or {}
         if crm.get("UseRawSoql"):
@@ -165,6 +171,70 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
     if nxt.get("NextAppletMultipleMatch"):
         form.append(("NextAppletMultipleMatch", nxt["NextAppletMultipleMatch"]))
     return form
+
+
+def extract_data_router(html: str) -> dict:
+    """Parse a Data Router page into {"rules": [...], "default": name or None, "operators": {...}}.
+
+    The page model (Nvm.DataRouter.load) holds the rules in order, each routing to an applet
+    by name, the default applet ("If rule does not match, route to") and the operators each
+    data type offers.
+    """
+    for raw in PAGE_MODEL.findall(html):
+        model = json.loads(html_lib.unescape(raw.replace("\\'", "'")))
+        if isinstance(model, dict) and "RoutingRules" in model:
+            return {
+                "rules": model.get("RoutingRules") or [],
+                "default": model.get("DefaultAppletInstanceName") or None,
+                "operators": {int(k): [o["Value"] for o in v] for k, v in (model.get("DataTypeOperators") or {}).items()},
+            }
+    raise PortalError("Data Router page has no RoutingRules model; the page format may have changed")
+
+
+def data_router_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
+    """Build the DataRouter form post, as the page sends it on save (dataRouter.har).
+
+    settings["RoutingRules"] are the rules without their applet; nxt holds "RoutingRules.<i>"
+    and "DefaultApplet" by name. Only the recorded cases are built: text, number and date
+    rules with any operator, and True/False rules. A rule or default with no applet in nxt is posted with
+    an empty destination, so the rule is kept (user's decision; the portal saves it:
+    dataRouter2.har). See data_router_missing_targets.
+    """
+    rules = settings.get("RoutingRules") or []
+    if not rules:
+        raise PortalError("a Data Router without rules cannot be saved: VCC needs a data source in the first rule "
+                          "(import-plan creates it empty instead)")
+    form: list[tuple[str, str]] = []
+    for i, rule in enumerate(rules):
+        data_type, operator = rule.get("DataType"), rule.get("OperatorType")
+        if data_type not in DR_RECORDED_TYPES:
+            raise PortalError(f"Data Router rule {i + 1} (RoutingRules.{i}): data type {data_type} has not been recorded yet "
+                              f"(recorded: {', '.join(f'{k} {v}' for k, v in DR_RECORDED_TYPES.items())}); it cannot be saved")
+        if not rule.get("LeftHandDataSource"):
+            raise PortalError(f"Data Router rule {i + 1} (RoutingRules.{i}) has no data source; it cannot be saved")
+        p = f"[rule{i}]"
+        form += [
+            (f"{p}.LeftHandDataSource", rule["LeftHandDataSource"]),
+            ("index", f"rule{i}"),
+            (f"{p}.DataType", str(data_type)),
+            (f"{p}.OperatorType", operator or ""),
+            # Always posted, even when unused: "is null"/"is not null" keep an old value (dataRouter4.har).
+            (f"{p}.RightHandFixedValue", rule.get("RightHandFixedValue") or ""),
+        ]
+        if data_type == DR_BOOLEAN:
+            form.append((f"{p}.RightHandFixedBooleanValue", rule.get("RightHandFixedBooleanValue") or ""))
+        form.append((f"{p}.RouteToApplet", nxt.get(f"RoutingRules.{i}") or ""))
+    form.append(("defaultApplet", nxt.get("DefaultApplet") or ""))
+    return form
+
+
+def data_router_missing_targets(settings: dict, nxt: dict) -> list[str]:
+    """The rules (and default) of a Data Router that route to no applet, e.g. "rule 3 (RoutingRules.2)"."""
+    missing = [f"rule {i + 1} (RoutingRules.{i})" for i in range(len(settings.get("RoutingRules") or []))
+               if not nxt.get(f"RoutingRules.{i}")]
+    if not nxt.get("DefaultApplet"):
+        missing.append("default applet")
+    return missing
 
 
 def extract_initial_applet(html: str, plan_id: str) -> str | None:
@@ -421,7 +491,8 @@ class PortalClient:
         self._account_checked = True
         check_portal_account(self.account, self.signed_in_account())
 
-    def _request(self, method: str, path: str, *, expect_redirect: bool = False, **kwargs) -> requests.Response:
+    def _request(self, method: str, path: str, *, expect_redirect: bool | None = False, **kwargs) -> requests.Response:
+        """expect_redirect: True needs a redirect, False needs HTTP 200, None accepts either."""
         self._check_account()
         url = f"{self.base}/{path}"
         headers = {"Origin": self.account.portal_url.rsplit("/CallCentre", 1)[0], **kwargs.pop("headers", {})}
@@ -431,7 +502,10 @@ class PortalClient:
             raise SessionExpired(
                 f"Portal session for '{self.account.name}' has expired. Run: vccflow login -a {self.account.name}"
             )
-        if expect_redirect:
+        if expect_redirect is None:
+            if not resp.is_redirect and resp.status_code != 200:
+                raise PortalError(f"{method} {path} failed: HTTP {resp.status_code} {resp.text[:300]}")
+        elif expect_redirect:
             if not resp.is_redirect:
                 raise PortalError(f"{method} {path}: expected a redirect, got HTTP {resp.status_code} {resp.text[:300]}")
         elif resp.status_code != 200:
@@ -470,6 +544,10 @@ class PortalClient:
     def get_data_connector(self, applet: dict) -> dict:
         """Return extract_data_connector() for a Data Connector from list_applets()."""
         return extract_data_connector(self._request("GET", applet["configUrl"]).text)
+
+    def get_data_router(self, applet: dict) -> dict:
+        """Return extract_data_router() for a Data Router from list_applets()."""
+        return extract_data_router(self._request("GET", applet["configUrl"]).text)
 
     def get_applet_form(self, applet: dict) -> dict:
         """Editor page fields of an applet from list_applets(), for types without a parsed format."""
@@ -596,6 +674,28 @@ class PortalClient:
         if any(errors):
             raise PortalError(f"Saving Data Connector '{name}' was refused: {'; '.join(e for e in errors if e)}")
         return extract_data_connector(resp.text)
+
+    def save_data_router(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
+        """Save a Data Router's rules and default applet, as its page's save does.
+
+        The page posts a plain form (no form token) and redirects with appletSaved=True.
+        Returns the saved page parsed by extract_data_router(), for reading back.
+        """
+        self._require_writes()
+        form = data_router_form(settings, nxt)  # fails before any request if unsupported
+        page_url = f"DataRouter?phoneNum={quote(plan_id)}&myApp={quote(name)}"
+        resp = self._request("POST", page_url, expect_redirect=None,
+                             headers={"Referer": f"{self.base}/{page_url}"}, data=form)
+        if not resp.is_redirect:
+            # Refused: the page comes back with its validation summary, e.g. "Rule 1: Please select
+            # a Data Source from the list" when the rule's data source does not exist in the account.
+            errors = [re.sub(r"<[^>]+>|\s+", " ", e).strip() for e in VALIDATION_ERRORS.findall(resp.text)]
+            reason = "; ".join(e for e in errors if e) or "no reason shown on the page"
+            raise PortalError(f"Saving Data Router '{name}' was refused: {reason}")
+        location = resp.headers.get("Location", "")
+        if "appletsaved=true" not in location.lower():
+            raise PortalError(f"Saving Data Router '{name}' was not confirmed: redirected to {location}")
+        return extract_data_router(self._request("GET", f"{page_url}&appletSaved=True").text)
 
     def rename_callback_number(self, which: str, new_name: str) -> dict:
         """Rename a callback number, given its number, ID or current name. Return it as read back.

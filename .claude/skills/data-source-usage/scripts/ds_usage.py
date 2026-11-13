@@ -45,6 +45,16 @@ DS_FIELD = re.compile(r"DataSource|\.Key$|Destination|Item1$", re.I)
 APPLET_LABEL = re.compile(r"^(.*) \([^()]*\)$")  # "Name (Applet Type)" in next-applet pickers
 
 
+# Set Data Source that vccflow import-plan keeps so that data sources the plan needs exist in the
+# account (VCC lists a data source only while some applet sets it). Nothing leads to it, it never
+# runs. The older name was used briefly on 2026-11-13.
+AUX_APPLETS = {"zz vccflow aux data sources", "zz vccflow data sources"}
+
+
+def is_aux(r: dict) -> bool:
+    return r["role"] == "SET" and r["applet"].lower() in AUX_APPLETS
+
+
 def show(name: str) -> str:
     """The name in quotes, so leading and trailing spaces are visible."""
     return f'"{name}"'
@@ -133,6 +143,8 @@ def references(applet: dict) -> list[dict]:
         if not isinstance(v, str) or DROPDOWNS.search(path):
             continue
         for name in PLACEHOLDER.findall(v):
+            if name.lower() == "javascriptengineurl":
+                continue  # Vonage keyword marking a JavaScript Data Connector, not a data source
             if VA_OUTPUT.search(path):
                 add(name, "SET", "Virtual Assistant output", path)
             else:
@@ -278,9 +290,11 @@ def main() -> int:
         print("\nDATA SOURCE | set by applets | read by applets | plans")
         for key in sorted(rows, key=lambda k: (norm(k), k)):
             rs = rows[key]
-            s = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "SET"})
+            s = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "SET" and not is_aux(r)})
             g = len({(r["plan"], r["applet"]) for r in rs if r["role"] == "READ"})
-            flag = "  SET-NEVER-READ" if s and not g else "  READ-NEVER-SET" if g and not s else ""
+            aux = any(is_aux(r) for r in rs)
+            flag = ("  AUX-ONLY" if aux and not s else "  SET-NEVER-READ" if s and not g
+                    else "  READ-NEVER-SET" if g and not s else "")
             if spacing(key):
                 flag += "  SPACES"
             print(f"{' / '.join(show(n) for n in sorted(spellings[key]))} | {s} | {g} | "
@@ -298,6 +312,14 @@ def main() -> int:
             print("\nSAME NAME BUT FOR SPACES (two data sources where one was probably meant):")
             for v in variants:
                 print("  " + " / ".join(show(names[k]) for k in v))
+        aux_only = [k for k, rs in rows.items() if any(is_aux(r) for r in rs)
+                    and not any(r["role"] == "SET" and not is_aux(r) for r in rs)]
+        if aux_only:
+            print(f"\nKEPT IN THE ACCOUNT ONLY BY A VCCFLOW AUXILIARY APPLET ({len(aux_only)}; no other applet sets them, "
+                  "deleting that applet removes them from the account):")
+            for k in sorted(aux_only, key=lambda k: (norm(k), k)):
+                where = sorted({r["plan"] for r in rows[k] if is_aux(r)})
+                print(f"  {' / '.join(show(n) for n in sorted(spellings[k]))} (in: {', '.join(where)})")
         if account_list is not None:
             unused = [n for n in account_list if n.lower() not in rows]
             print(f"\nIN THE ACCOUNT BUT NO APPLET SETS OR READS THEM ({len(unused)} of {len(account_list)}):")
@@ -327,12 +349,18 @@ def main() -> int:
             applets = {(r["plan"], r["applet"]) for r in group}
             print(f"--- {role}: {len(applets)} applets in {len({r['plan'] for r in group})} plans")
             for r in sorted(group, key=lambda r: (r["plan"].lower(), r["applet"].lower())):
-                print(f"  {r['plan']} | {r['applet']} ({r['type']}) | {r['detail']}")
+                aux_note = " [vccflow auxiliary applet: only keeps the data source in the account, never runs]" if is_aux(r) else ""
+                print(f"  {r['plan']} | {r['applet']} ({r['type']}) | {r['detail']}{aux_note}")
                 print(f"      from: {', '.join(r['from']) or '-'}")
                 print(f"      next: {', '.join(r['next']) or '-'}")
-        if not any(r["role"] == "READ" for r in rs):
+        real_set = any(r["role"] == "SET" and not is_aux(r) for r in rs)
+        if any(is_aux(r) for r in rs) and not real_set:
+            print("  >> KEPT IN THE ACCOUNT ONLY BY A VCCFLOW AUXILIARY APPLET: no other applet sets it, so in a call "
+                  "it has a value only if it comes from elsewhere (system, transfer, bot); deleting that applet "
+                  "removes it from the account's list")
+        elif not any(r["role"] == "READ" for r in rs):
             print("  >> SET but never READ in any plan")
-        if not any(r["role"] == "SET" for r in rs):
+        elif not real_set:
             print("  >> READ but never SET in any plan (system data source, set elsewhere, or missing)")
     for v in spacing_variants(rows):
         print(f"\n>> SAME NAME BUT FOR SPACES: {' / '.join(show(s) for k in v for s in sorted(spellings[k]))}: two data "

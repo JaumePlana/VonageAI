@@ -229,7 +229,7 @@ def dump_bodies(har: dict, out_dir: Path) -> int:
         for kind, text in bodies.items():
             if text:
                 body, ext = _pretty(text)
-                (out_dir / f"{stem}.{kind}.{ext}").write_text(body, encoding="utf-8")
+                (out_dir / f"{stem}.{kind}.{ext}").write_text(body, encoding="utf-8", newline="")  # keep CRLF as recorded
                 count += 1
     return count
 

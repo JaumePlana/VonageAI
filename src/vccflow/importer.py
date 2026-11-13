@@ -18,9 +18,18 @@ from pathlib import Path
 from typing import Callable
 
 from vccflow import export
-from vccflow.portal import MAX_MEDIA_BYTES, PortalClient, PortalError, data_connector_form
+from vccflow.portal import MAX_MEDIA_BYTES, PortalClient, PortalError, data_connector_form, data_router_form, data_router_missing_targets
 
 DATA_CONNECTOR = "DataRetriever"
+DATA_ROUTER = export.DATA_ROUTER
+# Auxiliary Set Data Source that makes the data sources the target account lacks exist. VCC
+# refuses to save a Data Router rule whose data source is not in the account's list ("Rule 1:
+# Please select a Data Source from the list"). A data source is in the list only while some
+# applet sets it: deleting this applet removes them again (tested 2026-11-13), so it is kept.
+# Nothing leads to it, so it never runs. "zz" sorts it last; the same name is reused next time.
+# It is created only when a data source is missing. One in the source plan is not copied as an
+# applet: its keys that the target account lacks go into the target's own auxiliary applet.
+AUX_SDS = "zz vccflow Aux Data Sources"
 # Applet types whose editor saves through Applet/Save (the React editor).
 EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu"}
 
@@ -39,11 +48,16 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
             data_connector_form(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+    if applet["type"] == DATA_ROUTER and applet["settings"].get("RoutingRules"):  # no rules: created, not saved
+        try:
+            data_router_form(applet["settings"], applet.get("next", {}))
         except PortalError as e:
             return str(e)
     return None
@@ -189,6 +203,14 @@ def import_plan(
     they stop the import before any write.
     """
     doc = load_plan(plan_dir)
+    # The source's auxiliary applet is not copied: it would count as setting its keys and hide them
+    # from the check below. Its keys are checked against the target account instead.
+    source_aux = next((a for a in doc["applets"] if a["name"] == AUX_SDS), None)
+    aux_keys = [d["Key"] for d in (source_aux or {}).get("settings", {}).get("DataSources") or [] if d.get("Key")]
+    if source_aux:
+        doc = {**doc, "applets": [a for a in doc["applets"] if a["name"] != AUX_SDS]}
+        log(f"NOTE: '{AUX_SDS}' in the source plan is not copied as an applet; its {len(aux_keys)} data sources "
+            "are checked against the target account")
     if skip_unsupported:
         doc, notes = drop_unsupported(doc)
         for n in notes:
@@ -198,6 +220,7 @@ def import_plan(
         raise PortalError(f"Target plan is '{listing.get('name')}', expected '{target_plan_name}'")
     problems = check_plan(doc, plan_dir, {a["name"] for a in listing.get("applets", [])})
     existing = portal.list_data_sources(target_plan_id)
+    to_create: list[str] = []
     if existing is None:
         log("WARNING: could not read the target account's data sources (no applet to read them from); not checked")
     else:
@@ -209,10 +232,36 @@ def import_plan(
         else:
             for m in missing:
                 log(f"WARNING: {m}")
+            lower = {e.lower() for e in existing}
+            wanted = {n.lower(): n for n in [*aux_keys, *export.data_sources_needed(doc["applets"])]}
+            to_create = sorted((n for k, n in wanted.items() if k not in lower), key=str.lower)
+            already = [k for k in aux_keys if k.lower() in lower]
+            if already:
+                log(f"NOTE: {len(already)} data sources of the source's '{AUX_SDS}' already exist in the target "
+                    f"account, not added: {', '.join(already)}")
+    aux_in_target = any(a["name"] == AUX_SDS for a in listing.get("applets", []))
     if problems:
         raise PortalError("Cannot import:\n  " + "\n  ".join(problems))
     applets = doc["applets"]
     log(f"Checks passed: {len(applets)} applets from '{doc['plan']['name']}' into '{target_plan_name}'")
+    missing_targets = {a["name"]: m for a in applets if a["type"] == DATA_ROUTER
+                       and (m := data_router_missing_targets(a["settings"], a.get("next", {})))}
+    verb = "would be" if dry_run else "is"
+    empty_routers = {a["name"] for a in applets if a["type"] == DATA_ROUTER and not a["settings"].get("RoutingRules")}
+    for name in sorted(empty_routers):
+        missing_targets.pop(name, None)
+        log(f"WARNING: Data Router '{name}' has no rules: it {verb} created empty and not saved "
+            "(VCC only saves a Data Router whose first rule has a data source)."
+            + (f" Its default applet '{nxt}' is not set." if (nxt := next(a for a in applets if a['name'] == name)
+                                                             .get("next", {}).get("DefaultApplet")) else ""))
+    for name, m in missing_targets.items():
+        log(f"WARNING: Data Router '{name}' {verb} copied with no destination applet for: {', '.join(m)}. "
+            "Set them in the portal.")
+    if to_create:
+        where = "added to the existing" if aux_in_target else "set in a new"
+        log(f"NOTE: the {len(to_create)} missing data sources {'would be' if dry_run else 'are'} {where} auxiliary "
+            f"Set Data Source '{AUX_SDS}', which stays in the plan (VCC keeps a data source only while an applet sets "
+            f"it; nothing leads to this applet): {', '.join(to_create)}")
     if dry_run:
         for a in applets:
             log(f"  would create {a['name']} ({a['type']})")
@@ -221,6 +270,12 @@ def import_plan(
 
     created: list[str] = []
     try:
+        if to_create:
+            log(f"0. Making the data sources exist through '{AUX_SDS}'")
+            if not aux_in_target:
+                portal.create_applet(target_plan_id, "SetDataSource", AUX_SDS)
+                created.append(AUX_SDS)
+            _save_aux_sds(portal, target_plan_id, to_create)
         log("1. Creating applets")
         for a in applets:
             portal.create_applet(target_plan_id, a["type"], a["name"])
@@ -233,6 +288,14 @@ def import_plan(
             nxt = a.get("next", {})
             if a["type"] == DATA_CONNECTOR:
                 portal.save_data_connector(target_plan_id, a["name"], a["settings"], nxt)
+            elif a["type"] == DATA_ROUTER and a["name"] in empty_routers:
+                log(f"   {a['name']}: empty Data Router, created and not saved")
+                continue
+            elif a["type"] == DATA_ROUTER:
+                portal.save_data_router(target_plan_id, a["name"], a["settings"], nxt)
+                if a["name"] in missing_targets:
+                    log(f"   WARNING: '{a['name']}' has been copied with missing targets: "
+                        f"{', '.join(missing_targets[a['name']])}")
             else:
                 props = dict(portal.get_applet_state(target_plan_id, by_name[a["name"]])["appletProperties"])
                 props.update(json.loads(json.dumps(a["settings"])))
@@ -281,3 +344,13 @@ def import_plan(
     for n in notes:
         log(f"NOTE: {n}")
     return diffs
+
+
+def _save_aux_sds(portal: PortalClient, plan_id: str, names: list[str]) -> None:
+    """Save the auxiliary Set Data Source with a key for each name, keeping the keys it already has."""
+    applet = portal.find_applet(plan_id, AUX_SDS)
+    props = dict(portal.get_applet_state(plan_id, applet)["appletProperties"])
+    current = [d for d in props.get("DataSources") or [] if d.get("Key")]
+    have = {d["Key"].lower() for d in current}
+    props["DataSources"] = current + [{"Key": n, "Value": ""} for n in names if n.lower() not in have]
+    portal.save_applet(plan_id, AUX_SDS, props)

@@ -54,9 +54,13 @@ class FakePortal:
         self.writes.append(("create", name))
         self.applets[name] = {"type": applet_type, "props": {"AppletType": applet_type, "AppletGuid": f"guid-{name}"}}
 
+    forget_on_delete = False  # simulate data sources vanishing with the applet that set them
+
     def delete_applet(self, plan_id, name):
         self.writes.append(("delete", name))
-        del self.applets[name]
+        props = self.applets.pop(name)["props"]
+        if self.forget_on_delete and self.data_sources is not None:
+            self.data_sources -= {d["Key"] for d in props.get("DataSources") or []}
 
     def get_applet_state(self, plan_id, applet):
         return {"appletProperties": dict(self.applets[applet["name"]]["props"])}
@@ -66,6 +70,11 @@ class FakePortal:
             raise PortalError("boom")
         self.writes.append(("save", name))
         self.applets[name]["props"] = props
+        if self.data_sources is not None:  # saving a Set Data Source key adds it to the account
+            self.data_sources |= {d["Key"] for d in props.get("DataSources") or []}
+
+    def find_applet(self, plan_id, name):
+        return next(a for a in self.list_applets(plan_id)["applets"] if a["name"] == name)
 
     def upload_media(self, plan_id, name, path, filename):
         self.writes.append(("upload", name, filename))
@@ -196,7 +205,59 @@ def test_missing_data_sources_warn_by_default(tmp_path, monkeypatch):
     assert len(warnings) == 1 and "'Case Country' is used by LOG B but" in warnings[0]
     assert any("exists in the target account as 'VoiceCall|Id'" in m for m in logs)
     assert portal.writes  # imported anyway
+    # The missing one is set in the auxiliary Set Data Source, created first and kept.
+    assert portal.writes[:2] == [("create", "zz vccflow Aux Data Sources"), ("save", "zz vccflow Aux Data Sources")]
+    assert not any(w[0] == "delete" for w in portal.writes)
+    assert portal.applets["zz vccflow Aux Data Sources"]["props"]["DataSources"] == [{"Key": "Case Country", "Value": ""}]
+    assert "Case Country" in portal.data_sources
+    assert any("set in a new auxiliary Set Data Source 'zz vccflow Aux Data Sources', which stays in the plan" in m for m in logs)
 
+
+def test_existing_auxiliary_applet_gets_the_new_keys(tmp_path, monkeypatch):
+    doc = doc_reading("Case Country", "Contact Role")
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    portal.data_sources = {"Old Key"}
+    portal.applets["zz vccflow Aux Data Sources"] = {"type": "SetDataSource",
+                                                 "props": {"DataSources": [{"Key": "Old Key", "Value": ""}]}}
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: doc)
+    logs = []
+    import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=logs.append)
+    keys = [d["Key"] for d in portal.applets["zz vccflow Aux Data Sources"]["props"]["DataSources"]]
+    assert keys == ["Old Key", "Case Country", "Contact Role"]
+    assert ("create", "zz vccflow Aux Data Sources") not in portal.writes
+    assert any("added to the existing auxiliary Set Data Source" in m for m in logs)
+
+
+def test_source_auxiliary_applet_adds_only_its_keys_missing_in_the_target(tmp_path, monkeypatch):
+    doc = doc_reading("Case Country")
+    doc["applets"].append({"name": "zz vccflow Aux Data Sources", "type": "SetDataSource",
+                           "settings": {"DataSources": [{"Key": "AlwaysOpen", "Value": ""}, {"Key": "calltype", "Value": ""},
+                                                        {"Key": "Case Country", "Value": ""}]}, "next": {}})
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    portal.data_sources = {"CallType"}  # exists, in another letter case
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: doc)
+    logs = []
+    import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=logs.append)
+    keys = [d["Key"] for d in portal.applets["zz vccflow Aux Data Sources"]["props"]["DataSources"]]
+    # Case Country is still reported missing although the source's auxiliary applet sets it.
+    assert keys == ["AlwaysOpen", "Case Country"]
+    assert sum(1 for w in portal.writes if w == ("create", "zz vccflow Aux Data Sources")) == 1
+    assert any("'zz vccflow Aux Data Sources' in the source plan is not copied as an applet" in m for m in logs)
+    assert any("already exist in the target account, not added: calltype" in m for m in logs)
+    assert any("'Case Country' is used by LOG B but does not exist" in m for m in logs)
+
+
+def test_no_auxiliary_applet_when_every_data_source_exists(tmp_path, monkeypatch):
+    doc = doc_reading("Case Country")
+    write_plan(tmp_path, doc)
+    portal = FakePortal()
+    portal.data_sources = {"case country"}
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: doc)
+    import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None)
+    assert "zz vccflow Aux Data Sources" not in portal.applets
+    assert not any("Aux" in str(w) for w in portal.writes)
 
 def test_require_data_sources_stops_before_any_write(tmp_path):
     write_plan(tmp_path, doc_reading("Case Country"))

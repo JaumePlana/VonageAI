@@ -32,6 +32,15 @@ def test_identical_plans_report_nothing():
     assert report["differences"] == [] and report["problems"] == []
 
 
+def test_auxiliary_data_source_applet_is_a_note():
+    b = plan()
+    b["applets"].append({"name": "zz vccflow Aux Data Sources", "kind": "Set Data Source", "type": "SetDataSource",
+                         "settings": {"DataSources": [{"Key": "AlwaysOpen", "Value": ""}]}, "next": {}})
+    report = compare_docs(plan(), b)
+    assert report["differences"] == []
+    assert any("'zz vccflow Aux Data Sources' is only in the target plan" in n and "AlwaysOpen" in n for n in report["notes"])
+
+
 def test_applets_missing_on_either_side():
     a, b = plan(), plan()
     a["applets"].append({"name": "Only source", "kind": "Menu"})

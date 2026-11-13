@@ -20,6 +20,7 @@ from typing import Any, Callable
 from vccflow.portal import PortalClient, PortalError
 
 FORMAT = "vccflow.plan/1"
+DATA_ROUTER = "DataRouter"
 # Plan-level settings saved in the export. They are reported, not imported: a copy leaves them as they are.
 PLAN_SETTINGS = ("reportingGroupName", "displayInAgentInterface", "outboundClidBehaviour", "outboundClid")
 
@@ -41,6 +42,9 @@ DC_NOT_CONFIG = {
 # Lookup lists inside the Data Connector's Salesforce sub-models.
 DC_SUB_NOT_CONFIG = {"MatchBys", "MetabaseDetails", "DataSourceTypes", "IvrSlotDetails"}
 PLACEHOLDER = re.compile(r"\$\(([^)]+)\)")
+# Vonage keywords written like data sources but not data sources: $(JavascriptEngineUrl) as a
+# Data Connector's URL marks its definition as JavaScript code, not a REST request (user, 2026-11-13).
+RESERVED = {"javascriptengineurl"}
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
 
@@ -75,6 +79,17 @@ def split_connections(props: dict, names_by_id: dict | None = None) -> tuple[dic
             continue  # IDs, and NextApplet*Guid / *Url derived from the names
         else:
             settings[k] = v
+    return settings, nxt
+
+
+def split_data_router(rules: list[dict], default: str | None) -> tuple[dict, dict]:
+    """Return (settings, next) for a Data Router: the rules in order without their applet,
+    and "RoutingRules.<i>" and "DefaultApplet" by applet name. Rule order matters: VCC
+    routes on the first rule that matches."""
+    settings = {"RoutingRules": [{k: v for k, v in r.items() if k != "RouteToApplet"} for r in rules]}
+    nxt = {f"RoutingRules.{i}": r["RouteToApplet"] for i, r in enumerate(rules) if r.get("RouteToApplet")}
+    if default:
+        nxt["DefaultApplet"] = default
     return settings, nxt
 
 
@@ -141,11 +156,16 @@ def data_sources_created(applet: dict) -> set[str]:
 
 def data_sources_used(applet: dict) -> set[str]:
     """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
-    a Salesforce match data source and the values a Salesforce update writes."""
+    a Data Router rule's data source, a Salesforce match data source and the values a
+    Salesforce update writes."""
     s = applet.get("settings", {})
     found = set()
     for text in _strings(s):
         found.update(PLACEHOLDER.findall(text))
+    for rule in s.get("RoutingRules") or []:
+        if rule.get("LeftHandDataSource"):
+            found.add(rule["LeftHandDataSource"])
+    found = {n for n in found if n.lower() not in RESERVED}
     for key in ("DataSource", "AnnouncementDataSource"):
         if s.get(key):
             found.add(s[key])
@@ -221,6 +241,12 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         settings.update(dc["fields"])
         entry["settings"] = settings
         entry["next"] = {k: v for k, v in model.items() if _is_next_key(k) and v}
+        return entry
+
+    if config_url.startswith("DataRouter"):
+        dr = portal.get_data_router(applet)
+        entry["type"] = DATA_ROUTER
+        entry["settings"], entry["next"] = split_data_router(dr["rules"], dr["default"])
         return entry
 
     props = portal.get_applet_state(plan_id, applet)["appletProperties"]

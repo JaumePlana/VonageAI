@@ -42,7 +42,11 @@ def _diff(a: Any, b: Any, path: str = "") -> Iterator[tuple[str, Any, Any]]:
         for k in sorted(set(a) | set(b), key=str):
             yield from _diff(a.get(k), b.get(k), f"{path}.{k}" if path else str(k))
     elif isinstance(a, list) and isinstance(b, list):
-        if json.dumps(a, sort_keys=True, default=str) != json.dumps(b, sort_keys=True, default=str):
+        if len(a) == len(b) and a and all(isinstance(x, dict) for x in a + b):
+            # Same number of entries (e.g. Data Router rules): report each changed field, in order.
+            for i, (x, y) in enumerate(zip(a, b)):
+                yield from _diff(x, y, f"{path}[{i}]")
+        elif json.dumps(a, sort_keys=True, default=str) != json.dumps(b, sort_keys=True, default=str):
             yield path, a, b
     elif isinstance(a, (dict, list)) or isinstance(b, (dict, list)) or _norm(a) != _norm(b):
         yield path, a, b
@@ -112,10 +116,16 @@ def compare_docs(source: dict, target: dict) -> dict:
     src = {a["name"]: a for a in source["applets"]}
     dst = {a["name"]: a for a in target["applets"]}
 
-    for name in sorted(src.keys() - dst.keys()):
-        report["differences"].append(f"applet '{name}' ({src[name].get('kind')}) is missing in the target plan")
-    for name in sorted(dst.keys() - src.keys()):
-        report["differences"].append(f"applet '{name}' ({dst[name].get('kind')}) is only in the target plan")
+    for side, only in (("target", dst.keys() - src.keys()), ("source", src.keys() - dst.keys())):
+        if importer.AUX_SDS in only:  # made by import-plan to keep missing data sources in the account
+            only.discard(importer.AUX_SDS)
+            keys = [d.get("Key") for d in ((dst if side == "target" else src)[importer.AUX_SDS].get("settings") or {})
+                    .get("DataSources") or []]
+            report["notes"].append(f"'{importer.AUX_SDS}' is only in the {side} plan: the auxiliary Set Data Source "
+                                   f"vccflow keeps so that these data sources exist: {', '.join(map(str, keys))}")
+        for name in sorted(only):
+            where = "only in the target plan" if side == "target" else "missing in the target plan"
+            report["differences"].append(f"applet '{name}' ({(dst if side == 'target' else src)[name].get('kind')}) is {where}")
 
     for name in sorted(src.keys() & dst.keys()):
         a, b = src[name], dst[name]

@@ -73,6 +73,7 @@ For any other field, say what the field name suggests and that it isn't confirme
 When several data sources follow the same pattern (e.g. "Set Failure …" applets that copy `$(error)`), explain the pattern once, before the tables.
 
 **Observations:** only what the data shows, most important first:
+- Data sources kept in the account only by a vccflow auxiliary applet (`zz vccflow Aux Data Sources`, marked `[vccflow auxiliary applet …]` and `>> KEPT IN THE ACCOUNT ONLY BY A VCCFLOW AUXILIARY APPLET`; `--all` lists them). `import-plan` creates that applet so a copied plan's data sources exist in the account: VCC lists a data source only while some applet sets it, and refuses to save a Data Router rule on one that isn't listed. The applet never runs, so treat these as read but never set: say so, and that deleting the applet removes them from the account. Don't count it as a real setter.
 - Set but never read, or read but never set. For read-but-never-set, it may be a system data source (CallGuid, DialledNumber…), set by a Bot Connector, passed in by a plan transfer, or missing.
 - Names with leading spaces, trailing spaces or two or more spaces between words, and the same name under two spellings that differ only by spaces: where each is set and read.
 - The same purpose under different names, and which plans use which.
