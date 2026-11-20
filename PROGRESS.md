@@ -9,6 +9,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 **Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`, `/data-source-usage` (where data sources are set and read, across all plans; rescans and shows what changed since the previous scan).
 
 **Rules that shape the code:**
+- Out of the usual scope (user, 2026-11-20): Schedule `scheduledHolidays` and IVR Slots (Data Connectors and other applets). Don't offer them as next steps; vccflow warns or refuses when it meets them.
 - `portal_account` is mandatory per account. A missing one, or a login signed in to another account, gets its saved login removed. vccflow never logs out of VCC: that ends the user's other sessions.
 - Copying needs only `region`, `portal_account`, a login, and `allow_portal_writes` on the target. API credentials are optional, and give the reporting group and an extra cross-check.
 - Missing data sources are set in the auxiliary Set Data Source `zz vccflow Aux Data Sources`, kept in the target plan: VCC lists a data source only while some applet sets it, and refuses Data Router rules on unlisted ones. Created only when needed; a source plan's one is not copied, only its keys the target lacks. `$(JavascriptEngineUrl)` is a Vonage keyword, not a data source.
@@ -31,8 +32,8 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 1. Offered: compare `ifm-prod` with `ifm-test` for the plans whose CLID is not a callback number.
 2. Offered: make `compare-plans` easier to read (plan-level differences first, the rest grouped by applet). Viessmann Test vs PROD "DE Sales Voice" lists 744 differences, not analysed; applet types compared only through page fields probably inflate that.
 3. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Collect Input...). First real run done with Data Router (2026-11-13). `--skip-unsupported` copies the rest meanwhile.
-4. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers (JavaScript done 2026-11-13).
-5. Schedules: `scheduledHolidays` format unknown (not copied, warned); a past one-off special day not tested live; VCC does not say which plans use a schedule (Schedule Router).
+4. Data Connector cases not recorded yet: Salesforce create, other providers (JavaScript done 2026-11-13). IVR Slots (Salesforce match by IVR Slot, or in other applets): low priority, the user does not usually work with them; they stay refused with a clear message.
+5. Schedules: a past one-off special day not tested live; `scheduledHolidays` stays not copied (with a warning): low priority, the user does not usually work with them; VCC does not say which plans use a schedule (Schedule Router).
 6. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
 
 **Open items for the user:**
