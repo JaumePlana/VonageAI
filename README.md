@@ -49,6 +49,7 @@ vccflow copy-schedule "Jaume Test" --from JPlana --to Demo29 [--name "New name"]
 vccflow copy-schedule "Jaume Test" --from JPlana --name "Jaume Test 2"   # clone in the same account
 vccflow compare-schedules "Jaume Test" --from JPlana --to Demo29 [--other "Other name"]
 vccflow delete-schedule   -a JPlana "Jaume Test 2" [--dry-run]   # exact name or ID; doesn't know which plans use it
+# Schedule names are case-sensitive ("jaume test" and "Jaume Test" can coexist); a schedule needs at least a name and a time zone.
 vccflow login         -a JPlana                    # opens Chrome (--browser msedge for Edge); sign in, the window closes by itself
 vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
 vccflow applet        -a JPlana "zz Claude POC" "ANN Test"

@@ -58,6 +58,9 @@ def body_of(schedule: dict) -> dict:
 def check(body: dict) -> list[str]:
     """Problems the portal's rules would refuse, found before any write."""
     problems = []
+    for k, label in (("name", "a name"), ("timezone", "a time zone")):
+        if not str(body.get(k) or "").strip():
+            problems.append(f"it has no {label}: VCC needs at least a name and a time zone")
     targets = set(body.get("targets") or [])
     if body.get("defaultTarget") not in targets:
         problems.append(f"default service status '{body.get('defaultTarget')}' is not one of its statuses")
@@ -161,7 +164,7 @@ class SchedulesClient(ScopedApi):
         problems = check(body)
         if problems:
             raise SchedulesError(f"Schedule '{body['name']}' cannot be saved: " + "; ".join(problems))
-        if any(s["name"].lower() == body["name"].lower() for s in self.list()):
+        if any(s["name"] == body["name"] for s in self.list()):  # names are case-sensitive
             raise SchedulesError(f"A schedule named '{body['name']}' already exists in '{self.account.name}'")
         skeleton = {**{k: body[k] for k in ("name", "timezone", "defaultTarget", "is24HourFormat", "targets")},
                     "dayDefinitions": {}, "dayOfWeek": {}, "customDays": []}
@@ -198,8 +201,7 @@ class SchedulesClient(ScopedApi):
         if tz_note:
             notes.insert(0, tz_note)
         problems = check(body)
-        existing = {s["name"].lower() for s in target.list()}
-        if new_name.lower() in existing:
+        if any(s["name"] == new_name for s in target.list()):  # "jaume test" and "Jaume Test" coexist
             problems.append(f"a schedule named '{new_name}' already exists in '{target.account.name}'")
         if problems:
             raise SchedulesError(f"Cannot copy '{source['name']}' as '{new_name}': " + "; ".join(problems))

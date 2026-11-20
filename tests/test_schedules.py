@@ -137,7 +137,7 @@ def test_clone_creates_empty_then_saves_the_whole_schedule():
 def test_existing_name_or_disabled_writes_stop_before_writing():
     api = FakeApi([schedule(), schedule(id="2", name="Clone")])
     with pytest.raises(SchedulesError, match="already exists"):
-        client(api).copy_to(api.schedules[0], "clone")
+        client(api).copy_to(api.schedules[0], "Clone")
     with pytest.raises(SchedulesError, match="Writes are disabled"):
         client(FakeApi([schedule()]), writes=False).copy_to(schedule(), "Other")
     assert not [m for m, *_ in api.calls if m != "GET"]
@@ -166,6 +166,19 @@ def test_delete_by_exact_name_or_id_and_check_it_is_gone():
         client(api).delete("jaume test (clone)")  # exact name only
     with pytest.raises(SchedulesError, match="Writes are disabled"):
         client(api, writes=False).delete("2907cb12")
+
+
+def test_names_are_case_sensitive():
+    api = FakeApi([schedule()])
+    saved, _, _ = client(api).copy_to(schedule(), "jaume test")  # "Jaume Test" exists: both coexist in VCC
+    assert saved["name"] == "jaume test" and [s["name"] for s in api.schedules] == ["Jaume Test", "jaume test"]
+
+
+def test_name_and_time_zone_are_required():
+    for k in ("name", "timezone"):
+        b = body_of(schedule())
+        b[k] = " "
+        assert any("needs at least a name and a time zone" in p for p in check(b))
 
 
 def test_dry_run_writes_nothing():
