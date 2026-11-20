@@ -59,14 +59,9 @@ def digits(number: Any) -> str:
     return re.sub(r"\D", "", str(number or ""))
 
 
-def normalise(entry: dict) -> dict:
-    """An API entry plus "number" (the CLID), the key earlier versions of vccflow returned."""
-    return {"id": entry.get("id"), "name": entry.get("name"), "number": entry.get("clid"), **entry}
-
-
 def matching(entries: list[dict], which: str) -> list[dict]:
     """Entries whose ID, current name or number (digits only) is `which`."""
-    return [e for e in entries if which in (str(e["id"]), e["name"]) or (digits(which) and digits(which) == digits(e["number"]))]
+    return [e for e in entries if which in (str(e["id"]), e["name"]) or (digits(which) and digits(which) == digits(e["clid"]))]
 
 
 def parse_csv(text: str) -> list[dict]:
@@ -145,9 +140,9 @@ class CallbackNumbersClient:
     # --- reads ---
 
     def list(self) -> list[dict]:
-        """The account's callback numbers, each with "number" (the CLID) as well as the API fields."""
+        """The account's callback numbers, as the API returns them (id, name, clid, language, ...)."""
         body = self._call("GET", self.base, READ_SCOPES).json()
-        return [normalise(e) for e in body.get("callbackNumbers", [])]
+        return body.get("callbackNumbers", [])
 
     def export_csv(self) -> str:
         """The bulk CSV (Clid,Name,NewName with NewName empty), as the portal's export gives it."""
@@ -167,20 +162,20 @@ class CallbackNumbersClient:
                                        "Give its ID to choose one.")
         entry = found[0]
         if entry["name"] == new_name:
-            raise CallbackNumbersError(f"{entry['number']} ({entry.get('language')}) is already named '{new_name}'")
+            raise CallbackNumbersError(f"{entry['clid']} ({entry.get('language')}) is already named '{new_name}'")
         try:
             self._call("PATCH", f"{self.base}/{entry['id']}", WRITE_SCOPES, json={"name": new_name})
         except CallbackNumbersError as e:
             # e.g. 400 "Name already exists. Try again with a different name.": a single rename
             # refuses a name another entry has; the bulk CSV upload accepts it (callbackNumbers.v2.har).
             if e.status == 400:
-                raise CallbackNumbersError(f"VCC refused renaming {entry['number']} ({entry.get('language')}) to "
+                raise CallbackNumbersError(f"VCC refused renaming {entry['clid']} ({entry.get('language')}) to "
                                            f"'{new_name}': {_message(e)} The bulk CSV upload (rename-callback-numbers) "
                                            "accepts a name another entry has.", 400) from e
             raise
         saved = next((e for e in self.list() if e["id"] == entry["id"]), None)
         if saved is None or saved["name"] != new_name:
-            raise CallbackNumbersError(f"{entry['number']} is still named '{(saved or entry)['name']}' after the rename")
+            raise CallbackNumbersError(f"{entry['clid']} is still named '{(saved or entry)['name']}' after the rename")
         return saved
 
     def plan_bulk(self, rows: list[dict]) -> list[dict]:
@@ -196,7 +191,7 @@ class CallbackNumbersClient:
             new = r["NewName"].strip()
             if not new or new == r["Name"]:
                 continue
-            found = [e for e in entries if digits(e["number"]) == digits(r["Clid"]) and e["name"] == r["Name"]]
+            found = [e for e in entries if digits(e["clid"]) == digits(r["Clid"]) and e["name"] == r["Name"]]
             if not found:
                 raise CallbackNumbersError(f"{r['Clid']} named '{r['Name']}' is not a callback number of "
                                            f"'{self.account.name}' (export the CSV again: names may have changed)")

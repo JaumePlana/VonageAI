@@ -123,7 +123,7 @@ def cmd_list_data_sources(args: argparse.Namespace) -> None:
 
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
     saved = _callback_numbers(args).rename(args.number, args.name)
-    print(f"Renamed {saved['number']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
+    print(f"Renamed {saved['clid']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
 
 
 def cmd_list_destinations(args: argparse.Namespace) -> None:

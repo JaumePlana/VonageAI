@@ -71,10 +71,10 @@ def client(entries=None, providers=None, writes=True):
     return CallbackNumbersClient(account, session=api, providers=providers, log=lambda m: None), api
 
 
-def test_list_keeps_the_api_fields_and_adds_number():
+def test_list_returns_the_api_entries_as_they_are():
     c, api = client()
     first = c.list()[0]
-    assert first["number"] == "+349000001" and first["language"] == "es-ES" and first["guid"] == "g1"
+    assert first == entry(1, "349000001", "+349000001", "es-ES")
     method, url, headers, *_ = api.calls[0]
     assert (method, url) == ("GET", BASE)
     assert headers["Accept"] == "application/vnd.newvoicemedia.v1+json" and headers["Authorization"] == "Bearer api-admin:read"

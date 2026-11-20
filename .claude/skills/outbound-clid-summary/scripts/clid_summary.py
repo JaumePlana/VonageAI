@@ -69,7 +69,7 @@ def callback_check(active: list[dict], path: str) -> None:
     entries = json.loads(Path(path).read_text(encoding="utf-8"))
     callback = defaultdict(list)  # a number can have several entries, e.g. one name per language
     for n in entries:
-        callback[digits(n["number"])].append(n["name"])
+        callback[digits(n["clid"])].append(n["name"])
     print(f"\nCALLBACK NUMBERS: {len(callback)} numbers in the account ({len(entries)} entries)")
     used = defaultdict(list)
     for p in active:
