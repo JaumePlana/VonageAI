@@ -17,6 +17,8 @@ from vccflow.manager import ManagerClient, ManagerError
 from vccflow.media_channels import MediaChannelsClient, MediaChannelsError
 from vccflow import callback_numbers
 from vccflow.callback_numbers import CallbackNumbersClient, CallbackNumbersError
+from vccflow import schedules
+from vccflow.schedules import SchedulesClient, SchedulesError
 from vccflow.portal import PortalClient, PortalError, check_portal_account, remove_session
 from vccflow.portal_token import PortalTokenProvider
 
@@ -124,6 +126,72 @@ def cmd_list_data_sources(args: argparse.Namespace) -> None:
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
     saved = _callback_numbers(args).rename(args.number, args.name)
     print(f"Renamed {saved['clid']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
+
+
+def _schedules(args: argparse.Namespace, account_name: str) -> SchedulesClient:
+    return SchedulesClient(load_account(account_name, Path(args.config)))
+
+
+def cmd_list_schedules(args: argparse.Namespace) -> None:
+    items = _schedules(args, args.account).list()
+    if args.summary:
+        for s in sorted(items, key=lambda s: s["name"].lower()):
+            print(schedules.describe(s))
+    else:
+        _print_json(items)
+
+
+def cmd_copy_schedule(args: argparse.Namespace) -> None:
+    target_name = args.to or args.source_account
+    new_name = args.name or args.schedule
+    if target_name == args.source_account and new_name == args.schedule:
+        raise SystemExit("A copy in the same account needs another name: add --name \"<new name>\"")
+    source = _schedules(args, args.source_account)
+    target = source if target_name == args.source_account else _schedules(args, target_name)
+    original = source.find(args.schedule)
+    saved, body, notes = source.copy_to(original, new_name, target, dry_run=args.dry_run)
+    for n in notes:
+        print(f"NOTE: {n}")
+    special = body.get("customDays") or []
+    what = (f"'{original['name']}' ({args.source_account}) -> '{new_name}' ({target_name}): "
+            f"{len(body.get('targets') or [])} service statuses, {len(body.get('dayOfWeek') or {})} active weekdays, "
+            f"{len(special)} special days")
+    if args.dry_run:
+        print(f"Dry run, nothing written: {what}")
+        return
+    print(f"Copied {what}; new ID {saved['id']}.")
+    diffs = schedules.differences(original, saved)
+    left_out = {f"special day '{c['name']}' only in the first" for c in original.get("customDays") or []
+                if c["name"] not in {d["name"] for d in special}}
+    unexpected = [d for d in diffs if d not in left_out]
+    if unexpected:
+        print("WARNING: the copy differs from the source:\n  " + "\n  ".join(unexpected))
+    else:
+        print("Read back: the copy matches the source"
+              + (" apart from the special days left out above." if left_out else "."))
+
+
+def cmd_delete_schedule(args: argparse.Namespace) -> None:
+    client = _schedules(args, args.account)
+    s = client.find(args.schedule)
+    print(f"{'Would delete' if args.dry_run else 'Deleting'} '{s['name']}' (ID {s['id']}) in '{args.account}': "
+          f"{len(s.get('dayOfWeek') or {})} active weekdays, {len(s.get('customDays') or [])} special days, "
+          f"last updated {s.get('lastUpdated')} by {s.get('lastUpdatedBy')}.")
+    if args.dry_run:
+        print("Dry run: nothing deleted. vccflow cannot tell whether a plan's Schedule Router uses it: check before deleting.")
+        return
+    client.delete(s["id"])
+    print(f"Deleted; '{s['name']}' is no longer listed in '{args.account}'.")
+
+
+def cmd_compare_schedules(args: argparse.Namespace) -> None:
+    a = _schedules(args, args.source_account).find(args.schedule)
+    b = _schedules(args, args.to or args.source_account).find(args.other or args.schedule)
+    diffs = schedules.differences(a, b)
+    print(f"Comparing '{a['name']}' ({args.source_account}) with '{b['name']}' ({args.to or args.source_account})")
+    print(f"DIFFERENCES ({len(diffs)})" + "".join(f"\n  {d}" for d in diffs))
+    if diffs:
+        raise SystemExit(1)
 
 
 def cmd_list_destinations(args: argparse.Namespace) -> None:
@@ -362,6 +430,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("number", help="the entry's ID, its current name, or its number (if it has one entry only)")
     p.add_argument("name", help="new name, up to 50 characters")
     p.set_defaults(func=cmd_rename_callback_number)
+    p = with_account(sub.add_parser("list-schedules", help="list schedules in full (API; admin:read)"))
+    p.add_argument("--summary", action="store_true", help="one line per schedule")
+    p.set_defaults(func=cmd_list_schedules)
+    p = sub.add_parser("copy-schedule", help="copy a schedule to another account, or clone it under another name (writes)")
+    p.add_argument("schedule", help="schedule name or ID")
+    p.add_argument("--from", dest="source_account", required=True, help="account to copy from")
+    p.add_argument("--to", help="account to copy to (default: the same account)")
+    p.add_argument("--name", help="name of the copy (default: the same; required within one account)")
+    p.add_argument("--dry-run", action="store_true", help="check and show what would be copied, without writing")
+    p.set_defaults(func=cmd_copy_schedule)
+    p = with_account(sub.add_parser("delete-schedule", help="delete one schedule by exact name or ID (writes)"))
+    p.add_argument("schedule", help="exact schedule name or ID")
+    p.add_argument("--dry-run", action="store_true", help="show what would be deleted")
+    p.set_defaults(func=cmd_delete_schedule)
+    p = sub.add_parser("compare-schedules", help="compare two schedules, in one account or two (read-only)")
+    p.add_argument("schedule", help="schedule name or ID")
+    p.add_argument("--from", dest="source_account", required=True, help="account of the first schedule")
+    p.add_argument("--to", help="account of the second (default: the same)")
+    p.add_argument("--other", help="name or ID of the second (default: the same name)")
+    p.set_defaults(func=cmd_compare_schedules)
     p = with_account(sub.add_parser("list-destinations", help="list destinations (addresses) per channel"))
     p.add_argument("--channel", action="append", choices=manager.CHANNELS, help="only this channel (repeatable)")
     p.add_argument("--source", choices=("media-channels", "manager"), default="media-channels",
@@ -462,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         if remove_session(e.account):
             print(f"The saved login for '{e.account.name}' was removed.", file=sys.stderr)
         return 1
-    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, SchedulesError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

@@ -26,17 +26,12 @@ from __future__ import annotations
 import csv
 import io
 import re
-import sys
-from typing import Any, Callable
 
-import requests
+from typing import Any
 
-from vccflow.auth import AuthError, TokenProvider
 from vccflow.config import Account
-from vccflow.portal import PortalError, SessionExpired
-from vccflow.portal_token import PortalTokenProvider
+from vccflow.scoped_api import ApiError, ScopedApi
 
-ACCEPT_V1 = "application/vnd.newvoicemedia.v1+json"
 PATH = "ccadministration/CallbackNumbers"
 READ_SCOPES = ("admin:read", "admin:write")
 WRITE_SCOPES = ("admin:write",)
@@ -44,10 +39,8 @@ CSV_HEADER = ["Clid", "Name", "NewName"]
 MAX_NAME = 50  # the legacy page's limit; kept as a guard
 
 
-class CallbackNumbersError(Exception):
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
+class CallbackNumbersError(ApiError):
+    pass
 
 
 def _message(e: Exception) -> str:
@@ -90,52 +83,15 @@ def write_csv(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
-class CallbackNumbersClient:
+class CallbackNumbersClient(ScopedApi):
     """Callback numbers of one account. Tries each (login, scope) in order until one is allowed."""
 
-    def __init__(self, account: Account, session: requests.Session | None = None,
-                 providers: list | None = None, log: Callable[[str], None] | None = None):
-        self.account = account
+    error = CallbackNumbersError
+    what = "callback numbers"
+
+    def __init__(self, account: Account, *args, **kwargs):
+        super().__init__(account, *args, **kwargs)
         self.base = f"{account.manager_api_url}/{PATH}"
-        self.session = session or requests.Session()
-        if providers is None:
-            providers = ([TokenProvider(account)] if account.has_api_credentials else []) + [PortalTokenProvider(account)]
-        self.providers = providers
-        self.log = log or (lambda m: print(m, file=sys.stderr))
-        self.used: str | None = None  # which login served the last call, for reporting
-
-    def _call(self, method: str, url: str, scopes: tuple[str, ...], **kwargs) -> requests.Response:
-        refused = []
-        extra = kwargs.pop("headers", {})
-        for provider in self.providers:
-            label = "portal login" if isinstance(provider, PortalTokenProvider) else "API credentials"
-            for scope in scopes:
-                try:
-                    token = provider.token(scope)
-                except SessionExpired:
-                    raise  # "The portal login ... has expired. Run: vccflow login ..." as it is
-                except (AuthError, PortalError) as e:
-                    refused.append(f"{label} {scope}: {str(e)[:80]}")
-                    continue
-                headers = {"Accept": ACCEPT_V1, "Authorization": f"Bearer {token}", **extra}
-                resp = self.session.request(method, url, headers=headers, timeout=60, **kwargs)
-                if resp.status_code in (401, 403):
-                    refused.append(f"{label} {scope}: HTTP {resp.status_code} {resp.text[:80]}")
-                    continue
-                if resp.status_code not in (200, 204):
-                    raise CallbackNumbersError(f"{method} {url}: HTTP {resp.status_code} {resp.text[:300]}", resp.status_code)
-                if self.used != label:
-                    self.used = label
-                    if label == "portal login":
-                        self.log(f"Callback numbers of '{self.account.name}': using the portal login "
-                                 f"({'the API credentials lack the scope' if len(self.providers) > 1 else 'no API credentials'}).")
-                return resp
-        raise CallbackNumbersError(f"No login of '{self.account.name}' may {method} callback numbers: " + "; ".join(refused))
-
-    def _require_writes(self) -> None:
-        if not self.account.allow_portal_writes:
-            raise CallbackNumbersError(f"Writes are disabled for '{self.account.name}'. "
-                                       "Set allow_portal_writes = true for it in accounts.toml.")
 
     # --- reads ---
 

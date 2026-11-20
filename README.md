@@ -44,6 +44,11 @@ vccflow list-callback-numbers   -a JPlana          # API (admin:read): API crede
 vccflow rename-callback-number  -a JPlana 2275226 "New name"   # one entry, by ID, current name or number (admin:write)
 vccflow export-callback-numbers -a JPlana --out cb.csv          # Clid,Name,NewName: fill in NewName
 vccflow rename-callback-numbers -a JPlana cb.csv --dry-run      # bulk rename; rows only for what changes are enough
+vccflow list-schedules    -a JPlana --summary                   # schedules (API, admin:read); without --summary: full JSON
+vccflow copy-schedule "Jaume Test" --from JPlana --to Demo29 [--name "New name"] [--dry-run]
+vccflow copy-schedule "Jaume Test" --from JPlana --name "Jaume Test 2"   # clone in the same account
+vccflow compare-schedules "Jaume Test" --from JPlana --to Demo29 [--other "Other name"]
+vccflow delete-schedule   -a JPlana "Jaume Test 2" [--dry-run]   # exact name or ID; doesn't know which plans use it
 vccflow login         -a JPlana                    # opens Chrome (--browser msedge for Edge); sign in, the window closes by itself
 vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
 vccflow applet        -a JPlana "zz Claude POC" "ANN Test"
