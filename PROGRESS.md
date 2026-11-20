@@ -4,7 +4,7 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 
 ## Resume here (end of 2026-11-20)
 
-**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector, Menu and Data Router applets. Lists: plans, mappings, destinations, callback numbers (API since 2026-11-20; rename one or in bulk by CSV), schedules (list, copy across accounts or clone, compare), data sources (`list-data-sources`, alias `list-datasources`, `--like` filter). Data source usage across all plans of an account, with scan comparison (skill `/data-source-usage`). 144 tests pass. Details are in the log below.
+**Where we are:** export, import, `copy-plan`, `compare-plans` and `compare-exports` work within and between accounts, for Announcer, Set Data Source, Data Connector, Menu and Data Router applets. Lists: plans, mappings, destinations, callback numbers (API since 2026-11-20; rename one or in bulk by CSV), schedules (list, copy across accounts or clone, compare, delete), data sources (`list-data-sources`, alias `list-datasources`, `--like` filter). Data source usage across all plans of an account, with scan comparison (skill `/data-source-usage`). 146 tests pass. Details are in the log below.
 
 **Skills** (`.claude/skills/`): `/copy-interaction-plan`, `/add-applet-type`, `/outbound-clid-summary`, `/data-source-usage` (where data sources are set and read, across all plans; rescans and shows what changed since the previous scan).
 
@@ -13,9 +13,11 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 - Copying needs only `region`, `portal_account`, a login, and `allow_portal_writes` on the target. API credentials are optional, and give the reporting group and an extra cross-check.
 - Missing data sources are set in the auxiliary Set Data Source `zz vccflow Aux Data Sources`, kept in the target plan: VCC lists a data source only while some applet sets it, and refuses Data Router rules on unlisted ones. Created only when needed; a source plan's one is not copied, only its keys the target lacks. `$(JavascriptEngineUrl)` is a Vonage keyword, not a data source.
 - Data Routers: a missing destination is copied empty with a warning; one without rules is created and not saved (VCC refuses to save it).
+- Schedules: names and special day names are case-sensitive; a schedule needs at least a name and a time zone; a copy drops past one-off special days; an empty one is created without a second save. Callback numbers: the bulk CSV upload must hold every entry; a PATCH to a name any entry has (even its own) is refused.
+- Calls on the API host try the API credentials, then the portal login, scope by scope (`scoped_api.py`).
 - Plan-level settings (reporting group, Outbound CLID) are exported and compared, not copied. The user cannot change the Outbound CLID in the current UI, so vccflow only reports it. A POST on the plan might update it: not tried, by the user's decision.
 
-**State in VCC:** Demo29 "POC Claude" (`b918444e-…`, the test plan with every Data Router case, 24 applets) is copied into Demo29 "POC Copy Claude" (`3dc82ac3-…`) and JPlana "zz POC Claude" (`da7310e5-…`, with the auxiliary applet holding 9 data sources): both match. Empty a target before copying into it again (the user does it). JPlana has the DISH Data Connectors' credentials again through this copy. Portal logins expire: `vccflow login -a <account>` (both Viessmann logins had expired at the end of 2026-11-11).
+**State in VCC:** Demo29 "POC Claude" (`b918444e-…`, the test plan with every Data Router case, 24 applets) is copied into Demo29 "POC Copy Claude" (`3dc82ac3-…`) and JPlana "zz POC Claude" (`da7310e5-…`, with the auxiliary applet holding 9 data sources): both match. Empty a target before copying into it again (the user does it). JPlana has the DISH Data Connectors' credentials again through this copy. Schedules: JPlana "Jaume Test", "Second test", "Test"; Demo29 "Fab'n'Fit schedule", "Test Schedule" (all test copies deleted). JPlana callback names are as in the HAR baseline. Portal logins expire: `vccflow login -a <account>` (both Viessmann logins had expired at the end of 2026-11-11).
 
 **Viessmann error handling (user's changes, 2026-11-11, Test and PROD):** every Data Connector that writes `error` (12 per account) has its failure exits on a "Set Failure …" Set Data Source that sets `"SF Error Response"` = `$(error)`. `"Salesforce Error Response"`, `Vonage_error` and `" Failure Case Lookup"` (leading space) are gone from PROD. Scans of both accounts from that day are in `exports/<account>/applet-scan/` (PROD also `applet-scan-previous`, before the user's PROD changes).
 
@@ -30,10 +32,12 @@ Goals and background: [CONTEXT.md](CONTEXT.md). Setup and usage: [README.md](REA
 2. Offered: make `compare-plans` easier to read (plan-level differences first, the rest grouped by applet). Viessmann Test vs PROD "DE Sales Voice" lists 744 differences, not analysed; applet types compared only through page fields probably inflate that.
 3. More applet types with `/add-applet-type` and a HAR (ACD, Skill Tagger, Collect Input...). First real run done with Data Router (2026-11-13). `--skip-unsupported` copies the rest meanwhile.
 4. Data Connector cases not recorded yet: Salesforce match by IVR Slot, Salesforce create, other providers (JavaScript done 2026-11-13).
-5. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
+5. Schedules: `scheduledHolidays` format unknown (not copied, warned); a past one-off special day not tested live; VCC does not say which plans use a schedule (Schedule Router).
+6. Later: DrawIO/Visio -> `plan.json` -> `import-plan`.
 
 **Open items for the user:**
 - Rotate the Odoo `client_secret` / bearer token in the DISH Data Connectors. Copies in zz Claude POC and Demo29 POC Test carry them too.
+- ifm-prod callback entry ID 3702902 has a name starting with a tab character.
 - Tell the IFM owner about the 4 `ifm-prod` plans whose CLID is not a callback number (run `/outbound-clid-summary ifm-prod` for the list).
 - Where do `Contact Language`, `Contact Role`, `CustomerReference` and `JavascriptEngineUrl` come from? JPlana does not list them either. Partly answered 2026-11-13: "DC JavaScript" reads `Contact Language`, `Contact Role` and `JavascriptEngineUrl`; "DC Get Client" reads `CustomerReference`. Nothing in the plan sets them.
 - `exports/` holds HARs, exports and applet scans with credentials and cookies: git-ignored, keep private.
