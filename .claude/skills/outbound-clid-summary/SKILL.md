@@ -18,7 +18,7 @@ CB="$(mktemp)"; .venv/Scripts/vccflow.exe list-callback-numbers -a <account> > "
 
 Add `--archived` after `clid_summary.py` only if the user asks about archived plans.
 
-`list-plans` uses the account's API credentials, or its portal login if it has none, and prints a note when it does. Say which one was used. `list-callback-numbers` always needs the portal login: there's no API for it. If it fails for a reason other than the login, run the summary without `--callback-numbers` and state plainly that the callback check wasn't done.
+`list-plans` uses the account's API credentials, or its portal login if it has none, and prints a note when it does. Say which one was used. `list-callback-numbers` uses the callback numbers API (scope `admin:read`, or `admin:write`) with the account's API credentials, or the portal login if they lack the scope, and prints a note when it uses the portal login. If it fails for a reason other than the login, run the summary without `--callback-numbers` and state plainly that the callback check wasn't done.
 
 If the login has expired or is missing, tell the user and ask, naming the account: "The portal login for **<account>** has expired. Do you want to log in to **<account>** now?" On yes, run `.venv/Scripts/vccflow.exe login -a <account>` with a 320000 ms timeout, then repeat the command. On no, stop. If the account has no `portal_account`, tell the user: the command refuses to run, and `login` reports the name to add.
 

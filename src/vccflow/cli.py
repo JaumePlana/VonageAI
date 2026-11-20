@@ -15,6 +15,8 @@ from vccflow.config import ConfigError, MissingPortalAccount, list_account_names
 from vccflow.ipm import IpmClient, IpmError
 from vccflow.manager import ManagerClient, ManagerError
 from vccflow.media_channels import MediaChannelsClient, MediaChannelsError
+from vccflow import callback_numbers
+from vccflow.callback_numbers import CallbackNumbersClient, CallbackNumbersError
 from vccflow.portal import PortalClient, PortalError, check_portal_account, remove_session
 from vccflow.portal_token import PortalTokenProvider
 
@@ -76,8 +78,37 @@ def cmd_list_mappings(args: argparse.Namespace) -> None:
     _print_json(_with_portal_login_fallback(args, lambda c: c.list_mappings()))
 
 
+def _callback_numbers(args: argparse.Namespace) -> CallbackNumbersClient:
+    return CallbackNumbersClient(load_account(args.account, Path(args.config)))
+
+
 def cmd_list_callback_numbers(args: argparse.Namespace) -> None:
-    _print_json(PortalClient(load_account(args.account, Path(args.config))).list_callback_numbers())
+    _print_json(_callback_numbers(args).list())
+
+
+def cmd_export_callback_numbers(args: argparse.Namespace) -> None:
+    text = _callback_numbers(args).export_csv()
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8", newline="")
+        print(f"Saved {args.out}: fill in NewName for the entries to rename, then run rename-callback-numbers.")
+    else:
+        sys.stdout.write(text)
+
+
+def cmd_rename_callback_numbers(args: argparse.Namespace) -> None:
+    client = _callback_numbers(args)
+    text = Path(args.csv).read_text(encoding="utf-8-sig")
+    changes = client.plan_bulk(callback_numbers.parse_csv(text))
+    if not changes:
+        print("Nothing to rename: no row has a NewName different from its Name.")
+        return
+    for c in changes:
+        print(f"  {c['Clid']} ({c['entry'].get('language')}): '{c['Name']}' -> '{c['NewName']}'")
+    if args.dry_run:
+        print(f"Dry run: {len(changes)} entries would be renamed in '{args.account}'.")
+        return
+    message, done = client.rename_bulk(text)
+    print(f"{message} Checked: the {len(done)} entries above now have their new names.")
 
 
 def cmd_list_data_sources(args: argparse.Namespace) -> None:
@@ -91,9 +122,8 @@ def cmd_list_data_sources(args: argparse.Namespace) -> None:
 
 
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
-    portal = PortalClient(load_account(args.account, Path(args.config)))
-    saved = portal.rename_callback_number(args.number, args.name)
-    print(f"Renamed {saved['number']} to '{saved['name']}' in '{args.account}'. No other setting on the page changed.")
+    saved = _callback_numbers(args).rename(args.number, args.name)
+    print(f"Renamed {saved['number']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
 
 
 def cmd_list_destinations(args: argparse.Namespace) -> None:
@@ -314,15 +344,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_list_plans)
     with_account(sub.add_parser("list-mappings", help="list mappings (address -> plan, with rules)")).set_defaults(
         func=cmd_list_mappings)
-    with_account(sub.add_parser("list-callback-numbers", help="list callback numbers (portal)")).set_defaults(
+    with_account(sub.add_parser("list-callback-numbers", help="list callback numbers (API; admin:read)")).set_defaults(
         func=cmd_list_callback_numbers)
+    p = with_account(sub.add_parser("export-callback-numbers", help="callback numbers as the bulk-rename CSV"))
+    p.add_argument("--out", help="file to write (default: print it)")
+    p.set_defaults(func=cmd_export_callback_numbers)
+    p = with_account(sub.add_parser("rename-callback-numbers", help="rename callback numbers in bulk from a CSV (writes)"))
+    p.add_argument("csv", help="CSV from export-callback-numbers with NewName filled in")
+    p.add_argument("--dry-run", action="store_true", help="show the renames without sending them")
+    p.set_defaults(func=cmd_rename_callback_numbers)
     p = with_account(sub.add_parser("list-data-sources", aliases=["list-datasources"],
                                     help="list the account's data source names (portal)"))
     p.add_argument("--like", action="append", help="only names containing this text, not case-sensitive (repeatable)")
     p.add_argument("--plan", help="plan ID to read the list from first (default: the first plan with a suitable applet)")
     p.set_defaults(func=cmd_list_data_sources)
-    p = with_account(sub.add_parser("rename-callback-number", help="rename a callback number (portal, writes)"))
-    p.add_argument("number", help="the callback number, its ID or its current name")
+    p = with_account(sub.add_parser("rename-callback-number", help="rename one callback number entry (writes)"))
+    p.add_argument("number", help="the entry's ID, its current name, or its number (if it has one entry only)")
     p.add_argument("name", help="new name, up to 50 characters")
     p.set_defaults(func=cmd_rename_callback_number)
     p = with_account(sub.add_parser("list-destinations", help="list destinations (addresses) per channel"))
@@ -425,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         if remove_session(e.account):
             print(f"The saved login for '{e.account.name}' was removed.", file=sys.stderr)
         return 1
-    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

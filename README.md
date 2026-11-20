@@ -40,8 +40,10 @@ When the API credentials lack a scope or the account has none, the list commands
 Applets are not in the public API; these commands use the Architect's own backend through your portal login session, saved under `.sessions/` (git-ignored, contains cookies).
 
 ```powershell
-vccflow list-callback-numbers  -a JPlana           # from the settings page (no API for it)
-vccflow rename-callback-number -a JPlana "+442030023771" "New name"   # checks that no other setting moved
+vccflow list-callback-numbers   -a JPlana          # API (admin:read): API credentials, else the portal login
+vccflow rename-callback-number  -a JPlana 2275226 "New name"   # one entry, by ID, current name or number (admin:write)
+vccflow export-callback-numbers -a JPlana --out cb.csv          # Clid,Name,NewName: fill in NewName
+vccflow rename-callback-numbers -a JPlana cb.csv --dry-run      # bulk rename; rows only for what changes are enough
 vccflow login         -a JPlana                    # opens Chrome (--browser msedge for Edge); sign in, the window closes by itself
 vccflow applets       -a JPlana "zz Claude POC"    # plan name or ID
 vccflow applet        -a JPlana "zz Claude POC" "ANN Test"
