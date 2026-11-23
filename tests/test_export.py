@@ -177,3 +177,95 @@ def test_export_records_connection_ids_that_do_not_resolve(tmp_path):
 
     doc = export_plan(Portal(), PLAN_ID, "P", tmp_path, log=lambda _: None)
     assert "not in this plan" in doc["applets"][0]["connectionProblems"][0]
+
+
+SCHED = "b5434940-67c7-41c2-b6dd-59c894a893d0"
+OTHER_SCHED = "a1f287dd-42ba-43c1-a9e2-9aaf12a489af"
+GUID_LC_TARGET = "ec91b743-aa77-11ee-980a-0267ee5b37ba"
+
+
+class ByNamePortal(FakePortal):
+    """A Schedule Router, a Loop Counter and a Call Connect Router, as VCC sends them (values made up)."""
+
+    listed = [
+        {"id": 101, "guid": "aaaaaaaa-0000-0000-0000-000000000001", "name": "SR Opening hours",
+         "appletType": "Schedule Router", "configUrl": "Applet?myApp=SR"},
+        {"id": 102, "guid": GUID_LC_TARGET, "name": "ANN Open", "appletType": "Announcer", "configUrl": "Applet?myApp=A"},
+        {"id": 103, "guid": "aaaaaaaa-0000-0000-0000-000000000003", "name": "ANN Closed",
+         "appletType": "Announcer", "configUrl": "Applet?myApp=C"},
+        {"id": 104, "guid": "aaaaaaaa-0000-0000-0000-000000000004", "name": "LC test",
+         "appletType": "Loop Counter", "configUrl": "Applet?myApp=LC"},
+        {"id": 105, "guid": "aaaaaaaa-0000-0000-0000-000000000005", "name": "CCR",
+         "appletType": "Call Connect Router", "configUrl": "Applet?myApp=CCR"},
+    ]
+    states = {
+        "SR Opening hours": {
+            "Schedule": SCHED, "DefaultAppletId": 102, "DefaultAppletGuid": None,
+            "ScheduleMappings": {f"{SCHED}:Closed": 103, f"{SCHED}:Open": 102, f"{OTHER_SCHED}:Open": 103}, "ScheduleNextAppletMappings": {},
+            "FailureAppletId": 102, "FailureAppletGuid": None, "AppletType": "ScheduleRouter", "NextApplet": "",
+            "EntityId": 101, "AppletGuid": "aaaaaaaa-0000-0000-0000-000000000001",
+        },
+        "ANN Open": {"AppletType": "DataAnnouncer", "Text": "Open"},
+        "ANN Closed": {"AppletType": "DataAnnouncer", "Text": "Closed"},
+        "LC test": {
+            "MaximumLoopCount": 2, "NextAppletIdOnMaximumReached": 102,
+            "NextAppletGuidOnMaximumReached": GUID_LC_TARGET, "AppletType": "LoopCounter",
+            "NextApplet": "ANN Closed", "NextAppletGuid": "aaaaaaaa-0000-0000-0000-000000000003",
+        },
+        "CCR": {
+            "AppletType": "CallDivert", "CallCompleteAppletId": None, "UnsuccessfulCallAppletId": 999,
+            "RingingAudio": {"AppletMedia": {"Id": 15200090, "AccountId": 0}, "TextToSpeech": ""},
+            "RingingAudioPath": "recordings/133338/B053/x.wav", "NextApplet": "ANN Open",
+        },
+    }
+    metadata = {"container": {"children": [{"type": "group", "children": [{"prop": "Schedule", "options": [
+        {"value": SCHED, "label": "Fab'n'Fit schedule"}, {"value": OTHER_SCHED, "label": "Test Schedule"}]}]}]}}
+
+    def list_applets(self, plan_id):
+        return {"applets": self.listed}
+
+    def get_applet_state(self, plan_id, applet):
+        return {"appletProperties": dict(self.states[applet["name"]]), "metadata": self.metadata}
+
+
+def test_types_not_imported_keep_applets_and_schedules_by_name(tmp_path):
+    doc = export_plan(ByNamePortal(), PLAN_ID, "P", tmp_path, log=lambda _: None)
+    by_name = {a["name"]: a for a in doc["applets"]}
+
+    sr = by_name["SR Opening hours"]
+    assert sr["settings"] == {"Schedule": "Fab'n'Fit schedule", "ScheduleNextAppletMappings": {}}
+    assert sr["next"] == {"DefaultApplet": "ANN Open", "FailureApplet": "ANN Open",
+                          "ScheduleMappings.Closed": "ANN Closed",
+                          "ScheduleMappings.Open": "ANN Open",
+                          # a mapping left from another schedule keeps that schedule's name
+                          "ScheduleMappings.Test Schedule:Open": "ANN Closed"}
+
+    lc = by_name["LC test"]
+    assert lc["settings"] == {"MaximumLoopCount": 2}
+    assert lc["next"] == {"NextApplet": "ANN Closed", "NextAppletOnMaximumReached": "ANN Open"}
+
+    ccr = by_name["CCR"]
+    assert "RingingAudioPath" not in ccr["settings"] and ccr["media"][0]["property"] == "RingingAudio"
+    assert ccr["next"] == {"NextApplet": "ANN Open"}
+    assert ccr["connectionProblems"] == ["'CCR' UnsuccessfulCallAppletId 999 is not in this plan"]
+
+
+def test_types_import_plan_writes_keep_their_settings_as_sent(tmp_path):
+    class Portal(ByNamePortal):
+        states = {**ByNamePortal.states, "ANN Open": {"AppletType": "DataAnnouncer", "Voice": SCHED, "DefaultAppletId": 103}}
+
+    doc = export_plan(Portal(), PLAN_ID, "P", tmp_path, log=lambda _: None)
+    ann = next(a for a in doc["applets"] if a["name"] == "ANN Open")
+    assert ann["settings"] == {"Voice": SCHED, "DefaultAppletId": 103} and ann["next"] == {}
+
+
+def test_resolve_applet_references_reports_two_targets():
+    from vccflow.export import resolve_applet_references
+
+    listed = [{"id": 1, "guid": "aaaaaaaa-0000-0000-0000-000000000001", "name": "A"},
+              {"id": 2, "guid": "aaaaaaaa-0000-0000-0000-000000000002", "name": "B"}]
+    rest, nxt, problems = resolve_applet_references(
+        "X", {"NextAppletIdOnMax": 1, "NextAppletGuidOnMax": "aaaaaaaa-0000-0000-0000-000000000002", "Count": 3,
+              "Plain": {"k": 3}}, listed)
+    assert rest == {"Count": 3, "Plain": {"k": 3}} and nxt == {"NextAppletOnMax": "A"}
+    assert problems == ["'X' NextAppletOnMax points to both 'A' and 'B'"]

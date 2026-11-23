@@ -5,6 +5,11 @@ account: applet IDs and GUIDs, the plan ID and media IDs. Connections between
 applets are kept by applet name, and uploaded audio files are saved next to
 the plan file, so the plan can be rebuilt in another plan or account.
 
+Applet types import-plan does not write yet keep account-specific references by name too, so
+that plans in two accounts compare by what they point to: other applets (as connections), and
+GUIDs their editor page labels (a Schedule Router's schedule). Their editor page fields keep a
+dropdown option that is an ID by its text (a plan, a presence state).
+
 Layout: <out_dir>/plan.json and <out_dir>/media/<applet name>.<ext>
 """
 
@@ -45,6 +50,9 @@ PLACEHOLDER = re.compile(r"\$\(([^)]+)\)")
 # Vonage keywords written like data sources but not data sources: $(JavascriptEngineUrl) as a
 # Data Connector's URL marks its definition as JavaScript code, not a REST request (user, 2026-11-13).
 RESERVED = {"javascriptengineurl"}
+# Editor-page applet types import-plan writes back: their settings stay exactly as VCC sends them.
+IMPORTABLE_EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu"}
+GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
 
@@ -80,6 +88,79 @@ def split_connections(props: dict, names_by_id: dict | None = None) -> tuple[dic
         else:
             settings[k] = v
     return settings, nxt
+
+
+def option_labels(metadata: Any) -> dict[str, str]:
+    """GUID -> label of every dropdown option in an editor page's metadata (e.g. schedule GUID -> name)."""
+    labels: dict[str, str] = {}
+    if isinstance(metadata, dict):
+        for o in metadata.get("options") or []:
+            if isinstance(o, dict) and isinstance(o.get("value"), str) and GUID.fullmatch(o["value"]) and o.get("label"):
+                labels[o["value"].lower()] = o["label"]
+        for v in metadata.values():
+            labels.update(option_labels(v))
+    elif isinstance(metadata, list):
+        for v in metadata:
+            labels.update(option_labels(v))
+    return labels
+
+
+def relabel(value: Any, labels: dict[str, str]) -> Any:
+    """Replace the GUIDs that labels knows, in values and in dictionary keys, by their labels."""
+    if isinstance(value, str):
+        return GUID.sub(lambda m: labels.get(m.group(0).lower(), m.group(0)), value)
+    if isinstance(value, dict):
+        return {relabel(k, labels): relabel(v, labels) for k, v in value.items()}
+    if isinstance(value, list):
+        return [relabel(v, labels) for v in value]
+    return value
+
+
+def _empty_ref(v: Any) -> bool:
+    return v is None or v == "" or v == 0
+
+
+def resolve_applet_references(applet: str, props: dict, listed: list[dict]) -> tuple[dict, dict, list[str]]:
+    """Move applet references held as IDs or GUIDs into connections by applet name.
+
+    For editor-page types import-plan does not write. Return (the other properties, next, problems):
+    - a property whose key holds "AppletId" or "AppletGuid" (DefaultAppletId, UnsuccessfulCallAppletId,
+      NextAppletIdOnMaximumReached + NextAppletGuidOnMaximumReached) becomes next[key without Id/Guid];
+    - a mapping whose values are all applet IDs or GUIDs (Schedule Router ScheduleMappings) becomes
+      next["<property>.<key>"].
+    References to applets that are not in the plan are reported, unless broken_connection_ids() does.
+    """
+    by_id = {int(a["id"]): a["name"] for a in listed if a.get("id")}
+    by_guid = {str(a["guid"]).lower(): a["name"] for a in listed if a.get("guid")}
+
+    def name_of(v: Any) -> str | None:
+        if isinstance(v, int) or (isinstance(v, str) and v.isdigit()):
+            return by_id.get(int(v))
+        if isinstance(v, str) and GUID.fullmatch(v):
+            return by_guid.get(v.lower())
+        return None
+
+    rest, nxt, problems = {}, {}, []
+    for k, v in props.items():
+        if k in ACCOUNT_SPECIFIC:
+            rest[k] = v
+        elif "AppletId" in k or "AppletGuid" in k:
+            if _empty_ref(v):
+                continue
+            base, name = k.replace("AppletId", "Applet").replace("AppletGuid", "Applet"), name_of(v)
+            if name is None:
+                if not (k.endswith("Guid") or k == "FailureAppletId"):  # those are in broken_connection_ids()
+                    problems.append(f"'{applet}' {k} {v} is not in this plan")
+            elif nxt.get(base, name) != name:
+                problems.append(f"'{applet}' {base} points to both '{nxt[base]}' and '{name}'")
+            else:
+                nxt[base] = name
+        elif isinstance(v, dict) and any(not _empty_ref(x) for x in v.values()) \
+                and all(_empty_ref(x) or name_of(x) for x in v.values()):
+            nxt.update({f"{k}.{sub}": name_of(x) for sub, x in v.items() if not _empty_ref(x)})
+        else:
+            rest[k] = v
+    return rest, nxt, problems
 
 
 def split_data_router(rules: list[dict], default: str | None) -> tuple[dict, dict]:
@@ -249,11 +330,28 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         entry["settings"], entry["next"] = split_data_router(dr["rules"], dr["default"])
         return entry
 
-    props = portal.get_applet_state(plan_id, applet)["appletProperties"]
+    state = portal.get_applet_state(plan_id, applet)
+    props = state["appletProperties"]
     entry["type"] = props.get("AppletType")
     listed = listed or []
-    settings, nxt = split_connections(props, {a["id"]: a["name"] for a in listed if a.get("id")})
     problems = broken_connection_ids(applet["name"], props, listed) if listed else []
+    # Types import-plan writes keep their settings as VCC sends them. The others are only exported
+    # and compared, so their account-specific references are kept by name: applets, and GUIDs the
+    # page's dropdowns label (e.g. a Schedule Router's schedule).
+    by_name = entry["type"] not in IMPORTABLE_EDITOR_TYPES
+    resolved: dict = {}
+    if by_name:
+        props, resolved, unresolved = resolve_applet_references(applet["name"], props, listed)
+        problems += unresolved
+        # A Schedule Router maps "<schedule GUID>:<status>"; its own schedule is a setting of its own,
+        # so its statuses are kept as "ScheduleMappings.<status>" and compare across schedules.
+        own = f"ScheduleMappings.{props.get('Schedule')}:"
+        resolved = {("ScheduleMappings." + k[len(own):]) if k.startswith(own) else k: v for k, v in resolved.items()}
+    settings, nxt = split_connections(props, {a["id"]: a["name"] for a in listed if a.get("id")})
+    nxt.update(resolved)
+    if by_name:
+        labels = option_labels(state.get("metadata"))
+        settings, nxt = relabel(settings, labels), relabel(nxt, labels)
     if problems:
         entry["connectionProblems"] = problems
     entry["settings"] = settings
@@ -271,6 +369,9 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         media.append({"property": path, "file": f"media/{filename}", "name": info.get("name"),
                       "sha256": hashlib.sha256(content).hexdigest()})
         _clear_media_id(settings, path)
+        if by_name:
+            # The file's storage path holds the account number; the audio is compared by name and content.
+            settings.pop(f"{path}Path", None)
     if media:
         entry["media"] = media
     return entry

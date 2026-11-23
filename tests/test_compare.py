@@ -217,3 +217,17 @@ def test_report_findings_are_still_plain_lines():
     b = plan()
     by_name(b, "ANN A")["settings"]["Text"] = "Hi"
     assert compare_docs(plan(), b)["differences"] == ["'ANN A' setting Text: source Hello | target Hi"]
+
+
+def test_form_values_keep_account_specific_options_by_their_text():
+    html = """<form><select name="datagrid$ctl02$ddDialledNbr"><option value=""></option>
+    <option selected="selected" value="842eb571-b2d6-4819-b7b5-f4f22c5d799f">1012 - Shipment   Validation</option>
+    <option value="Partner_JPlana-5">1020 - Welcome</option></select>
+    <select name="Acd.PostUnexpectedPresenceStateGuid"><option value="">Leave unchanged</option>
+    <option value="83869ea1-e93a-11ef-9b45-0267ee5b37ba" selected>Away
+    <option value="8546640c-e93a-11ef-9b45-0267ee5b37ba">Comfort Break</select>
+    <select name="Id"><option value="1234567" selected>Queue A</option></select>
+    <select name="Mode"><option value="Sequential" selected>Sequential Routing</option></select></form>"""
+    assert extract_form_values(html) == {"datagrid$ctl02$ddDialledNbr": "1012 - Shipment Validation",
+                                         "Acd.PostUnexpectedPresenceStateGuid": "Away", "Id": "Queue A",
+                                         "Mode": "Sequential"}

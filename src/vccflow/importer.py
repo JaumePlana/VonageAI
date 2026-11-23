@@ -31,7 +31,7 @@ DATA_ROUTER = export.DATA_ROUTER
 # applet: its keys that the target account lacks go into the target's own auxiliary applet.
 AUX_SDS = "zz vccflow Aux Data Sources"
 # Applet types whose editor saves through Applet/Save (the React editor).
-EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu"}
+EDITOR_TYPES = export.IMPORTABLE_EDITOR_TYPES
 
 
 def load_plan(plan_dir: Path) -> dict:

@@ -44,6 +44,9 @@ FORM_NOISE = {
     "action", "application", "myapp", "name", "index", "notlogin", "validation", "addnewapplet", "hasapps",
     "Acd.DialledNumber", "Acd.ApplicationName",
 }
+# Dropdown values that identify something in one account (a plan, presence state...): a GUID or a long number.
+# The editor page fields keep such an option by its text, which names the same thing in every account.
+ACCOUNT_ID_VALUE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{6,}", re.I)
 PAGE_MODEL = re.compile(r"JSON\.parse\(htmlDecode\('(.*?)'\)\)", re.S)
 MODEL_LOOKUPS = ("All", "Possible", "Formatted", "QueryKeys", "DataTypeOperators", "UnsavedChanges", "Show")
 SIGNED_IN_USER = re.compile(r"var\s+user\s*=\s*\{(.*?)\};", re.S)
@@ -253,18 +256,29 @@ def extract_plans(html: str) -> list[dict]:
 
 
 class _FormFields(HTMLParser):
-    """Collect what a browser would submit from a page's inputs, selects and textareas."""
+    """Collect what a browser would submit from a page's inputs, selects and textareas.
+
+    A selected option whose value is an account-specific ID (ACCOUNT_ID_VALUE) is kept by its text.
+    """
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.fields: dict[str, list[str]] = {}
         self._select: str | None = None
+        self._option: tuple[str, list[str]] | None = None  # selected option being read: (value, text)
         self._textarea: str | None = None
         self._text: list[str] = []
 
     def _add(self, name: str | None, value: str) -> None:
         if name and name not in FORM_NOISE:
             self.fields.setdefault(name, []).append(value)
+
+    def _end_option(self) -> None:
+        if self._option is not None:
+            value, text = self._option
+            label = " ".join("".join(text).split())
+            self._add(self._select, label if label and ACCOUNT_ID_VALUE.fullmatch(value) else value)
+            self._option = None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -277,13 +291,18 @@ class _FormFields(HTMLParser):
             self._add(a.get("name"), a.get("value") or "")
         elif tag == "select":
             self._select = a.get("name")
-        elif tag == "option" and self._select and "selected" in a:
-            self._add(self._select, a.get("value") or "")
+        elif tag == "option" and self._select:
+            self._end_option()  # </option> is optional in HTML
+            if "selected" in a:
+                self._option = (a.get("value") or "", [])
         elif tag == "textarea":
             self._textarea, self._text = a.get("name"), []
 
     def handle_endtag(self, tag):
-        if tag == "select":
+        if tag == "option":
+            self._end_option()
+        elif tag == "select":
+            self._end_option()
             self._select = None
         elif tag == "textarea" and self._textarea:
             self._add(self._textarea, "".join(self._text).strip())
@@ -292,6 +311,8 @@ class _FormFields(HTMLParser):
     def handle_data(self, data):
         if self._textarea:
             self._text.append(data)
+        elif self._option is not None:
+            self._option[1].append(data)
 
 
 def extract_form_values(html: str) -> dict:
