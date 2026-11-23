@@ -70,3 +70,26 @@ def test_old_style_id_resolves_through_the_api():
             return [{"interactionPlanId": "NVMDemo29-4", "interactionPlanName": "Main & Co"}]
 
     assert resolve_plan("NVMDemo29-4", FakePortal(), Api()) == ("NVMDemo29-4", "Main & Co")
+
+
+def test_custom_configurations_come_from_the_first_data_connector():
+    from vccflow.portal import PortalClient, PortalError
+
+    portal = PortalClient.__new__(PortalClient)
+    portal.list_plans = lambda: [{"interactionPlanId": "p1"}, {"interactionPlanId": "p2"}]
+    portal.list_applets = lambda pid: {"applets": {
+        "p1": [{"name": "ANN", "configUrl": "Applet?myapp=ANN"}, {"name": "DC broken", "configUrl": "DataRetriever?x=1"}],
+        "p2": [{"name": "DC", "configUrl": "DataRetriever?x=2"}],
+    }[pid]}
+
+    def get_data_connector(applet):
+        if applet["name"] == "DC broken":
+            raise PortalError("page failed")
+        return {"model": {"CustomAccountConfigs": ["RTTSentimentParty", "RTTSentimentThreshold"]}}
+
+    portal.get_data_connector = get_data_connector
+    portal.get_applet_state = lambda pid, applet: (_ for _ in ()).throw(AssertionError("not a Data Connector"))
+    assert portal.list_custom_configurations() == ["RTTSentimentParty", "RTTSentimentThreshold"]
+
+    portal.list_applets = lambda pid: {"applets": [{"name": "ANN", "configUrl": "Applet?myapp=ANN"}]}
+    assert portal.list_custom_configurations() is None

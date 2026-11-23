@@ -59,3 +59,39 @@ def test_list_data_sources_without_a_source_applet(monkeypatch):
     args = build_parser().parse_args(["list-data-sources", "-a", "X"])
     with pytest.raises(SystemExit, match="to read the list from"):
         args.func(args)
+
+
+def test_list_custom_configurations_sorts_and_filters(monkeypatch, capsys):
+    import json
+    from unittest.mock import MagicMock
+
+    from vccflow import cli
+
+    portal = MagicMock()
+    portal.list_custom_configurations.return_value = ["RTTSentimentThreshold", "RTTSentimentParty", "Other"]
+    monkeypatch.setattr(cli, "load_account", lambda name, path: MagicMock())
+    monkeypatch.setattr(cli, "PortalClient", lambda account: portal)
+    parser = build_parser()
+
+    args = parser.parse_args(["list-custom-configs", "-a", "X"])
+    args.func(args)
+    assert json.loads(capsys.readouterr().out) == ["Other", "RTTSentimentParty", "RTTSentimentThreshold"]
+
+    args = parser.parse_args(["list-custom-configurations", "-a", "X", "--like", "rttsentiment", "--plan", "p1"])
+    args.func(args)
+    assert json.loads(capsys.readouterr().out) == ["RTTSentimentParty", "RTTSentimentThreshold"]
+    portal.list_custom_configurations.assert_called_with("p1")
+
+
+def test_list_custom_configurations_without_a_data_connector(monkeypatch):
+    import pytest
+    from unittest.mock import MagicMock
+
+    from vccflow import cli
+
+    monkeypatch.setattr(cli, "load_account", lambda name, path: MagicMock())
+    monkeypatch.setattr(cli, "PortalClient",
+                        lambda account: MagicMock(list_custom_configurations=MagicMock(return_value=None)))
+    args = build_parser().parse_args(["list-custom-configurations", "-a", "X"])
+    with pytest.raises(SystemExit, match="No Data Connector"):
+        args.func(args)

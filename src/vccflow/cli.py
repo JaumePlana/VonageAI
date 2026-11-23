@@ -123,6 +123,16 @@ def cmd_list_data_sources(args: argparse.Namespace) -> None:
     _print_json(sorted(names, key=lambda n: (n.lower(), n)))
 
 
+def cmd_list_custom_configurations(args: argparse.Namespace) -> None:
+    """The account's Custom Configuration names, sorted; Vonage sets them and their values on request."""
+    names = PortalClient(load_account(args.account, Path(args.config))).list_custom_configurations(args.plan)
+    if names is None:
+        raise SystemExit(f"No Data Connector in '{args.account}' to read the list from.")
+    likes = [s.lower() for s in args.like or []]
+    names = [n for n in names if not likes or any(s in n.lower() for s in likes)]
+    _print_json(sorted(names, key=lambda n: (n.lower(), n)))
+
+
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
     saved = _callback_numbers(args).rename(args.number, args.name)
     print(f"Renamed {saved['clid']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
@@ -426,6 +436,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--like", action="append", help="only names containing this text, not case-sensitive (repeatable)")
     p.add_argument("--plan", help="plan ID to read the list from first (default: the first plan with a suitable applet)")
     p.set_defaults(func=cmd_list_data_sources)
+    p = with_account(sub.add_parser("list-custom-configurations", aliases=["list-custom-configs"],
+                                    help="list the account's Custom Configuration names, without values (portal)"))
+    p.add_argument("--like", action="append", help="only names containing this text, not case-sensitive (repeatable)")
+    p.add_argument("--plan", help="plan ID to read the list from first (default: the first plan with a Data Connector)")
+    p.set_defaults(func=cmd_list_custom_configurations)
     p = with_account(sub.add_parser("rename-callback-number", help="rename one callback number entry (writes)"))
     p.add_argument("number", help="the entry's ID, its current name, or its number (if it has one entry only)")
     p.add_argument("name", help="new name, up to 50 characters")

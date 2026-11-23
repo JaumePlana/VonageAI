@@ -13,7 +13,7 @@ import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import requests
@@ -471,22 +471,45 @@ class PortalClient:
         list (metabase entries). It is read from the first such applet found, in plan_id
         first, then in the account's other plans. None if the account has no such applet.
         """
+        def read(pid: str, applet: dict) -> Any:
+            url = applet.get("configUrl") or ""
+            if url.startswith("DataRetriever"):
+                return self.get_data_connector(applet)["model"].get("MetabaseEntries")
+            if url.startswith("Applet?"):
+                return (self.get_applet_state(pid, applet).get("dataSourceKeys") or {}).get("metabaseEntries")
+            return None
+
+        entries = self._first_from_applets(plan_id, read)
+        return None if entries is None else set(entries)
+
+    def list_custom_configurations(self, plan_id: str | None = None) -> list[str] | None:
+        """The account's Custom Configuration names (CustomAccountConfigs), without their values.
+
+        Vonage sets them up on request; plans read them as #(Name), e.g. in a Data Connector
+        definition. Only the Data Connector editor page carries the list, so it is read from
+        the first Data Connector found, in plan_id first. None if the account has none.
+        """
+        def read(_pid: str, applet: dict) -> Any:
+            if not (applet.get("configUrl") or "").startswith("DataRetriever"):
+                return None
+            return self.get_data_connector(applet)["model"].get("CustomAccountConfigs")
+
+        names = self._first_from_applets(plan_id, read)
+        return None if names is None else list(names)
+
+    def _first_from_applets(self, plan_id: str | None, read: Callable[[str, dict], Any]) -> Any:
+        """First value read(plan_id, applet) returns that is not None, over the account's applets
+        (plan_id's first). Applets whose page fails to load are skipped."""
         plan_ids = [plan_id] if plan_id else []
         plan_ids += [p["interactionPlanId"] for p in self.list_plans() if p["interactionPlanId"] != plan_id]
         for pid in plan_ids:
             for applet in self.list_applets(pid).get("applets", []):
-                url = applet.get("configUrl") or ""
                 try:
-                    if url.startswith("DataRetriever"):
-                        entries = self.get_data_connector(applet)["model"].get("MetabaseEntries")
-                    elif url.startswith("Applet?"):
-                        entries = (self.get_applet_state(pid, applet).get("dataSourceKeys") or {}).get("metabaseEntries")
-                    else:
-                        continue
+                    value = read(pid, applet)
                 except PortalError:
                     continue
-                if entries is not None:
-                    return set(entries)
+                if value is not None:
+                    return value
         return None
 
     def find_applet(self, plan_id: str, name: str) -> dict:
