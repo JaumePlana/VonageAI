@@ -183,3 +183,37 @@ def test_outbound_clid_number_is_a_note_across_accounts_and_a_difference_within_
 def test_exports_without_outbound_clid_are_noted():
     report = compare_docs(plan(), with_clid("B", "CustomerClid"))
     assert report["differences"] == [] and any("outbound CLID not compared" in n for n in report["notes"])
+
+
+def test_report_groups_plan_level_first_then_one_block_per_applet():
+    a, b = plan(), plan()
+    b["plan"]["reportingGroupName"] = "Service"
+    b["applets"].append({"name": "Only target", "kind": "ACD"})
+    by_name(b, "ANN A")["settings"]["Text"] = "Hi"
+    by_name(b, "ANN A")["next"]["NextAppletSuccess"] = "DC C"
+    by_name(b, "ST B")["form"]["Skills"] = [{"Name": "DE", "Necessity": 2}]
+    lines = format_report(compare_docs(a, b)).splitlines()
+    assert lines[0] == ("SUMMARY: 5 differences (1 plan-level, 1 applets in one plan only, 3 in 2 applets), "
+                        "0 problems, 2 notes")
+    body = lines[lines.index("DIFFERENCES (5)") + 1:lines.index("PROBLEMS (0)")]
+    assert body[0] == "  Plan" and body[1].startswith("    reporting group: source Sales")
+    assert body[2] == "  Applets in one plan only"
+    assert body[4] == "  'ANN A' (Announcer): 2"
+    # Inside an applet block the applet name is not repeated.
+    assert body[5] == "    path NextAppletSuccess is different: source 'ST B' | target 'DC C'"
+    assert body[6] == "    setting Text: source Hello | target Hi"
+    assert body[7] == "  'ST B' (Skill Tagger): 1" and body[8] == "    field Skills[0].Name: source FR | target DE"
+
+
+def test_page_field_notes_are_listed_together_by_applet_type():
+    a = plan()
+    a["applets"].append({"name": "ST Z", "kind": "Skill Tagger", "unsupported": "x", "form": {}})
+    text = format_report(compare_docs(a, copy.deepcopy(a)))
+    assert "  Compared through their editor page fields only (2 applets)\n    Skill Tagger: 'ST B', 'ST Z'" in text
+    assert "compared through its editor page fields only" not in text
+
+
+def test_report_findings_are_still_plain_lines():
+    b = plan()
+    by_name(b, "ANN A")["settings"]["Text"] = "Hi"
+    assert compare_docs(plan(), b)["differences"] == ["'ANN A' setting Text: source Hello | target Hi"]

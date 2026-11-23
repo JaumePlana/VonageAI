@@ -72,7 +72,7 @@ Run this after every copy, even if the copy reported that it matches:
 vccflow compare-plans "<source plan>" "<target plan>" --from <source account> --to <target account>
 ```
 
-It is read-only, and exits with an error when it finds differences; that is a result to report, not a failure. It reports:
+It is read-only, and exits with an error when it finds differences; that is a result to report, not a failure. It starts with a SUMMARY line (differences plan-level, in one plan only, and in how many applets), then groups each section: plan-level lines, applets in one plan only, then one block per applet. It reports:
 
 - **DIFFERENCES:** applets missing in either plan or of another type; paths missing or different, in both directions; settings, including skills; audio files (name and content); initial applet; reporting group; Outbound CLID setting.
 - **PROBLEMS:** paths to applets that aren't in the plan; GUIDs and IDs that don't resolve inside their own plan; data sources the target lacks, with the applets that use them.

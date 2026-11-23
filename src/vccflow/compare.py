@@ -23,6 +23,33 @@ from vccflow.portal import PortalClient
 # Settings whose values may hold credentials: report that they differ, not their values.
 SENSITIVE = re.compile(r"ApiInteractionDefinition|secret|password|token|bearer|authorization|api_?key", re.I)
 MAX_SHOWN = 160
+PLAN, ONE_SIDE, PAGE_FIELDS = "plan", "one side", "page fields"
+
+
+class Finding(str):
+    """A report line that also knows what it is about, so format_report() can group it.
+
+    It is the full line, as before; `applet`, `kind` and `detail` (the line without the
+    applet name) say which applet it belongs to, and `section` places lines that belong to
+    no single applet (PLAN or ONE_SIDE: applets in one plan only) or that are listed
+    together (PAGE_FIELDS).
+    """
+
+    applet: str | None
+    kind: str | None
+    detail: str
+    section: str
+
+    def __new__(cls, text: str, applet: str | None = None, kind: str | None = None,
+                detail: str | None = None, section: str = PLAN) -> "Finding":
+        f = super().__new__(cls, text)
+        f.applet, f.kind, f.detail, f.section = applet, kind, detail or text, section
+        return f
+
+
+def _about(name: str, kind: str | None, detail: str, section: str = PLAN) -> Finding:
+    """A line about one applet: "'<name>' <detail>"."""
+    return Finding(f"'{name}' {detail}", name, kind, detail, section)
 
 
 def _is_empty(v: Any) -> bool:
@@ -63,14 +90,14 @@ def _case_only(a: Any, b: Any) -> bool:
     return json.dumps(a, default=str).lower() == json.dumps(b, default=str).lower()
 
 
-def _setting_findings(applet: str, a: Any, b: Any, report: dict, what: str = "setting") -> None:
+def _setting_findings(applet: str, kind: str | None, a: Any, b: Any, report: dict, what: str = "setting") -> None:
     for path, x, y in _diff(a, b):
         if SENSITIVE.search(path) or SENSITIVE.search(str(x)) or SENSITIVE.search(str(y)):
-            report["differences"].append(f"'{applet}' {what} {path} differs (values hidden: may hold credentials)")
+            report["differences"].append(_about(applet, kind, f"{what} {path} differs (values hidden: may hold credentials)"))
         elif _case_only(x, y):
-            report["notes"].append(f"'{applet}' {what} {path} differs only in letter case: {_show(x)} / {_show(y)}")
+            report["notes"].append(_about(applet, kind, f"{what} {path} differs only in letter case: {_show(x)} / {_show(y)}"))
         else:
-            report["differences"].append(f"'{applet}' {what} {path}: source {_show(x)} | target {_show(y)}")
+            report["differences"].append(_about(applet, kind, f"{what} {path}: source {_show(x)} | target {_show(y)}"))
 
 
 def read_plan(portal: PortalClient, plan_id: str, plan_name: str, metadata: dict | None = None) -> dict:
@@ -121,44 +148,50 @@ def compare_docs(source: dict, target: dict) -> dict:
             only.discard(importer.AUX_SDS)
             keys = [d.get("Key") for d in ((dst if side == "target" else src)[importer.AUX_SDS].get("settings") or {})
                     .get("DataSources") or []]
-            report["notes"].append(f"'{importer.AUX_SDS}' is only in the {side} plan: the auxiliary Set Data Source "
-                                   f"vccflow keeps so that these data sources exist: {', '.join(map(str, keys))}")
+            report["notes"].append(Finding(f"'{importer.AUX_SDS}' is only in the {side} plan: the auxiliary Set Data "
+                                           f"Source vccflow keeps so that these data sources exist: "
+                                           f"{', '.join(map(str, keys))}", section=ONE_SIDE))
         for name in sorted(only):
             where = "only in the target plan" if side == "target" else "missing in the target plan"
-            report["differences"].append(f"applet '{name}' ({(dst if side == 'target' else src)[name].get('kind')}) is {where}")
+            kind = (dst if side == "target" else src)[name].get("kind")
+            report["differences"].append(Finding(f"applet '{name}' ({kind}) is {where}", section=ONE_SIDE))
 
     for name in sorted(src.keys() & dst.keys()):
         a, b = src[name], dst[name]
-        if a.get("kind") != b.get("kind"):
-            report["differences"].append(f"'{name}' applet type: source {a.get('kind')} | target {b.get('kind')}")
+        kind = a.get("kind")
+        diffs = report["differences"]
+        if kind != b.get("kind"):
+            diffs.append(_about(name, None, f"applet type: source {kind} | target {b.get('kind')}"))
             continue
         an, bn = a.get("next", {}), b.get("next", {})
         for key in sorted(set(an) | set(bn)):
             if key not in bn:
-                report["differences"].append(f"'{name}' path {key} is missing in the target (source goes to '{an[key]}')")
+                diffs.append(_about(name, kind, f"path {key} is missing in the target (source goes to '{an[key]}')"))
             elif key not in an:
-                report["differences"].append(f"'{name}' path {key} is missing in the source (target goes to '{bn[key]}')")
+                diffs.append(_about(name, kind, f"path {key} is missing in the source (target goes to '{bn[key]}')"))
             elif an[key] != bn[key]:
-                report["differences"].append(f"'{name}' path {key} is different: source '{an[key]}' | target '{bn[key]}'")
+                diffs.append(_about(name, kind, f"path {key} is different: source '{an[key]}' | target '{bn[key]}'"))
         if a.get("unsupported") or b.get("unsupported"):
             if "form" in a and "form" in b:
-                report["notes"].append(f"'{name}' ({a.get('kind')}) compared through its editor page fields only")
-                _setting_findings(name, a["form"], b["form"], report, "field")
+                report["notes"].append(_about(name, kind, f"({kind}) compared through its editor page fields only",
+                                              PAGE_FIELDS))
+                _setting_findings(name, kind, a["form"], b["form"], report, "field")
             else:
-                report["notes"].append(f"'{name}' ({a.get('kind')}) settings not compared: "
-                                       "its editor page fields are not in the export (made before they were saved)")
+                report["notes"].append(_about(name, kind, f"({kind}) settings not compared: its editor page fields "
+                                                          "are not in the export (made before they were saved)"))
         else:
-            _setting_findings(name, a.get("settings"), b.get("settings"), report)
+            _setting_findings(name, kind, a.get("settings"), b.get("settings"), report)
         am = {m["property"]: m for m in a.get("media", [])}
         bm = {m["property"]: m for m in b.get("media", [])}
         for prop in sorted(set(am) | set(bm)):
             if prop not in bm or prop not in am:
                 side = "target" if prop not in bm else "source"
-                report["differences"].append(f"'{name}' audio {prop} is missing in the {side}")
+                diffs.append(_about(name, kind, f"audio {prop} is missing in the {side}"))
             elif am[prop].get("name") != bm[prop].get("name"):
-                report["differences"].append(f"'{name}' audio name: source '{am[prop].get('name')}' | target '{bm[prop].get('name')}'")
+                diffs.append(_about(name, kind, f"audio name: source '{am[prop].get('name')}' | "
+                                                f"target '{bm[prop].get('name')}'"))
             elif am[prop].get("sha256") and bm[prop].get("sha256") and am[prop]["sha256"] != bm[prop]["sha256"]:
-                report["differences"].append(f"'{name}' audio '{am[prop].get('name')}' has different content")
+                diffs.append(_about(name, kind, f"audio '{am[prop].get('name')}' has different content"))
 
     for key, label in (("initialApplet", "initial applet"), ("reportingGroupName", "reporting group")):
         x, y = source["plan"].get(key), target["plan"].get(key)
@@ -172,8 +205,11 @@ def compare_docs(source: dict, target: dict) -> dict:
         for a in doc["applets"]:
             for key, to in a.get("next", {}).items():
                 if to not in names:
-                    report["problems"].append(f"{side}: '{a['name']}' path {key} goes to '{to}', which is not in the plan")
-            report["problems"] += [f"{side}: {p}" for p in a.get("connectionProblems", [])]
+                    detail = f"path {key} goes to '{to}', which is not in the plan"
+                    report["problems"].append(Finding(f"{side}: '{a['name']}' {detail}", a["name"], a.get("kind"),
+                                                      f"{side}: {detail}"))
+            report["problems"] += [Finding(f"{side}: {p}", a["name"], a.get("kind"))
+                                   for p in a.get("connectionProblems", [])]
     return report
 
 
@@ -201,9 +237,46 @@ def compare_exports(source_dir: Path, target_dir: Path) -> dict:
     return report
 
 
+def _place(item: str) -> str:
+    """Where a line goes: an applet name, or PLAN / ONE_SIDE / PAGE_FIELDS. Plain strings are plan-level."""
+    section = getattr(item, "section", PLAN)
+    applet = getattr(item, "applet", None)
+    return section if section == PAGE_FIELDS or applet is None else applet
+
+
+def _section(items: list[str], lines: list[str]) -> None:
+    """Plan-level lines first, then applets in one plan only, then one block per applet."""
+    groups: dict[str, list[str]] = {}
+    for x in items:
+        groups.setdefault(_place(x), []).append(x)
+    for place, title in ((PLAN, "Plan"), (ONE_SIDE, "Applets in one plan only")):
+        if place in groups:
+            lines.append(f"  {title}")
+            lines += [f"    {x}" for x in groups.pop(place)]
+    if PAGE_FIELDS in groups:
+        found = groups.pop(PAGE_FIELDS)
+        by_kind: dict[str, list[str]] = {}
+        for x in found:
+            by_kind.setdefault(x.kind or "?", []).append(f"'{x.applet}'")
+        lines.append(f"  Compared through their editor page fields only ({len(found)} applets)")
+        lines += [f"    {kind}: {', '.join(names)}" for kind, names in sorted(by_kind.items())]
+    for name in sorted(groups, key=str.lower):
+        found = groups[name]
+        kind = next((x.kind for x in found if x.kind), None)
+        lines.append(f"  '{name}'" + (f" ({kind})" if kind else "") + f": {len(found)}")
+        lines += [f"    {x.detail}" for x in found]
+
+
 def format_report(report: dict) -> str:
-    lines = []
+    """The report grouped: a summary line, then per section the plan-level lines and one block per applet."""
+    diffs = report["differences"]
+    places = [_place(x) for x in diffs]
+    plan, one_side = places.count(PLAN), places.count(ONE_SIDE)
+    applets = len(set(places) - {PLAN, ONE_SIDE})
+    lines = [f"SUMMARY: {len(diffs)} differences ({plan} plan-level, {one_side} applets in one plan only, "
+             f"{len(diffs) - plan - one_side} in {applets} applets), "
+             f"{len(report['problems'])} problems, {len(report['notes'])} notes", ""]
     for key, title in (("differences", "DIFFERENCES"), ("problems", "PROBLEMS"), ("notes", "NOTES")):
         lines.append(f"{title} ({len(report[key])})")
-        lines += [f"  {x}" for x in report[key]]
+        _section(report[key], lines)
     return "\n".join(lines)

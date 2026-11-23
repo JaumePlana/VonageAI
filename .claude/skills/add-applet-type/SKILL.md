@@ -92,7 +92,7 @@ If the portal login has expired, ask the user to run `! .venv/Scripts/vccflow.ex
 1. Ask which plan contains the type and which empty scratch plan to copy into, unless the user said.
 2. `vccflow copy-plan "<plan>" "<scratch>" --from <a> --to <b> --dry-run`, then without `--dry-run`.
 3. The read-back must match. A difference is a bug or a new finding: investigate, don't dismiss it. Compare the new applet's connections directly as well, resolving its IDs and GUIDs against the target's applet list.
-4. Run `vccflow compare-plans "<plan>" "<scratch>" --from <a> --to <b>`. A correct copy must show no differences for this type, and no "compared through its editor page fields only" note for it.
+4. Run `vccflow compare-plans "<plan>" "<scratch>" --from <a> --to <b>`. A correct copy must show no differences for this type, and the type must not appear under the "Compared through their editor page fields only" note.
 5. Prove the comparison sees changes: compare the plan with another that has the type configured differently, if the account has one, or ask the user to change a setting in the scratch copy. It must report that difference. Don't change the applet yourself unless the user agrees.
 
 ## 8. Finish
