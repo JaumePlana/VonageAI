@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from vccflow import export, importer
-from vccflow.portal import PortalClient
+from vccflow.portal import PortalClient, skill_description
 
 # Settings whose values may hold credentials: report that they differ, not their values.
 SENSITIVE = re.compile(r"ApiInteractionDefinition|secret|password|token|bearer|authorization|api_?key", re.I)
 MAX_SHOWN = 160
 PLAN, ONE_SIDE, PAGE_FIELDS = "plan", "one side", "page fields"
+# Skill Tagger skill lists: sets of skills by name (VCC ignores their order and letter case).
+SKILL_LISTS = {"Skills": "skill", "DynamicSkills": "dynamic skill"}
 
 
 class Finding(str):
@@ -98,6 +100,32 @@ def _setting_findings(applet: str, kind: str | None, a: Any, b: Any, report: dic
             report["notes"].append(_about(applet, kind, f"{what} {path} differs only in letter case: {_show(x)} / {_show(y)}"))
         else:
             report["differences"].append(_about(applet, kind, f"{what} {path}: source {_show(x)} | target {_show(y)}"))
+
+
+def _requirement(skill: dict) -> str:
+    """"optional", "mandatory" or "mandatory for 8 hours", as the Skill Tagger page says it."""
+    return skill_description(skill).strip().removeprefix("is ").strip()
+
+
+def _skill_findings(applet: str, kind: str | None, a: dict, b: dict, report: dict) -> None:
+    """Compare the Skill Tagger's skills one by one, by name, rather than as whole lists."""
+    for key, what in SKILL_LISTS.items():
+        xs = {s["Name"].lower(): s for s in a.get(key) or []}
+        ys = {s["Name"].lower(): s for s in b.get(key) or []}
+        for k in sorted(set(xs) | set(ys)):
+            x, y = xs.get(k), ys.get(k)
+            if y is None:
+                detail = f"{what} '{x['Name']}' is only in the source ({_requirement(x)})"
+            elif x is None:
+                detail = f"{what} '{y['Name']}' is only in the target ({_requirement(y)})"
+            elif _requirement(x) != _requirement(y):
+                detail = f"{what} '{x['Name']}': source {_requirement(x)} | target {_requirement(y)}"
+            else:
+                if x["Name"] != y["Name"]:
+                    report["notes"].append(_about(applet, kind, f"{what} differs only in letter case: "
+                                                                f"'{x['Name']}' / '{y['Name']}'"))
+                continue
+            report["differences"].append(_about(applet, kind, detail))
 
 
 def read_plan(portal: PortalClient, plan_id: str, plan_name: str, metadata: dict | None = None) -> dict:
@@ -180,7 +208,12 @@ def compare_docs(source: dict, target: dict) -> dict:
                 report["notes"].append(_about(name, kind, f"({kind}) settings not compared: its editor page fields "
                                                           "are not in the export (made before they were saved)"))
         else:
-            _setting_findings(name, kind, a.get("settings"), b.get("settings"), report)
+            sa, sb = a.get("settings") or {}, b.get("settings") or {}
+            if a.get("type") == b.get("type") == export.SKILL_TAGGER:
+                _skill_findings(name, kind, sa, sb, report)
+                sa = {k: v for k, v in sa.items() if k not in SKILL_LISTS}
+                sb = {k: v for k, v in sb.items() if k not in SKILL_LISTS}
+            _setting_findings(name, kind, sa, sb, report)
         am = {m["property"]: m for m in a.get("media", [])}
         bm = {m["property"]: m for m in b.get("media", [])}
         for prop in sorted(set(am) | set(bm)):

@@ -18,10 +18,14 @@ from pathlib import Path
 from typing import Callable
 
 from vccflow import export
-from vccflow.portal import MAX_MEDIA_BYTES, PortalClient, PortalError, data_connector_form, data_router_form, data_router_missing_targets
+from vccflow.scoped_api import ApiError
+from vccflow.skills import SkillsClient
+from vccflow.portal import (MAX_MEDIA_BYTES, PortalClient, PortalError, data_connector_form, data_router_form,
+                            data_router_missing_targets, skill_tagger_form)
 
 DATA_CONNECTOR = "DataRetriever"
 DATA_ROUTER = export.DATA_ROUTER
+SKILL_TAGGER = export.SKILL_TAGGER
 # Auxiliary Set Data Source that makes the data sources the target account lacks exist. VCC
 # refuses to save a Data Router rule whose data source is not in the account's list ("Rule 1:
 # Please select a Data Source from the list"). A data source is in the list only while some
@@ -48,11 +52,16 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
             data_connector_form(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+    if applet["type"] == SKILL_TAGGER:
+        try:
+            skill_tagger_form(applet["settings"], applet.get("next", {}))
         except PortalError as e:
             return str(e)
     if applet["type"] == DATA_ROUTER and applet["settings"].get("RoutingRules"):  # no rules: created, not saved
@@ -140,6 +149,55 @@ def check_data_sources(applets: list[dict], existing: set[str]) -> tuple[list[st
     return missing, notes
 
 
+def check_skills(applets: list[dict], existing: list[str]) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Return (spellings, missing, notes) for the static skills of the plan's Skill Taggers.
+
+    Skill names are compared without letter case, as VCC does ("DE" exists, so "de" cannot be
+    created): spellings maps a source name to the target account's spelling where they differ.
+    missing maps each skill the target lacks to a message naming the applets that use it.
+    """
+    lower = {e.lower(): e for e in existing}
+    users: dict[str, set[str]] = {}
+    for a in applets:
+        if a.get("type") == SKILL_TAGGER:
+            for s in a["settings"].get("Skills") or []:
+                users.setdefault(s["Name"], set()).add(a["name"])
+    spellings, missing, notes = {}, {}, []
+    for name in sorted(users, key=str.lower):
+        found = lower.get(name.lower())
+        if found is None:
+            missing[name] = (f"skill '{name}' is used by {', '.join(sorted(users[name]))} "
+                             "but does not exist in the target account")
+        elif found != name:
+            spellings[name] = found
+            notes.append(f"skill '{name}' exists in the target account as '{found}': that spelling is used")
+    return spellings, missing, notes
+
+
+def use_skill_spellings(applets: list[dict], spellings: dict[str, str]) -> None:
+    """Rename the Skill Taggers' static skills to the target account's spelling."""
+    for a in applets:
+        if a.get("type") == SKILL_TAGGER:
+            for s in a["settings"].get("Skills") or []:
+                s["Name"] = spellings.get(s["Name"], s["Name"])
+
+
+def _resolve_skills(applets: list[dict], existing: list[str], log: Callable[[str], None],
+                    can_create: bool) -> list[str]:
+    """Use the target's spelling of existing skills; return the skills to create.
+
+    Without the User Admin API (can_create False), a missing skill stops the import.
+    """
+    spellings, missing, notes = check_skills(applets, existing)
+    for n in notes:
+        log(f"NOTE: {n}")
+    if missing and not can_create:
+        raise PortalError("Cannot import:\n  " + "\n  ".join(missing.values()) + "\n  They cannot be created: "
+                          "the User Admin API is not available with users:write for this account")
+    use_skill_spellings(applets, spellings)
+    return list(missing)
+
+
 def _set_path(props: dict, path: str, media_id: int) -> None:
     node = props
     for part in path.split("."):
@@ -194,8 +252,12 @@ def import_plan(
     skip_unsupported: bool = False,
     require_data_sources: bool = False,
     log: Callable[[str], None] = print,
+    skills: SkillsClient | None = None,
 ) -> list[str]:
     """Copy the exported plan in plan_dir into the target plan. Return the read-back differences.
+
+    skills (the target account's User Admin API) lists its skills and creates those the plan's
+    Skill Taggers need; created skills are reported, and deleted again if the import fails.
 
     With skip_unsupported, applets that cannot be imported yet are left out (see drop_unsupported).
     Data sources the plan reads but does not set should exist in the target account. Missing
@@ -243,6 +305,31 @@ def import_plan(
     if problems:
         raise PortalError("Cannot import:\n  " + "\n  ".join(problems))
     applets = doc["applets"]
+    # Static skills must exist in the target account: missing ones are created through the User Admin
+    # API. Without it, the skill list is read from any Skill Tagger page (or from the first Skill
+    # Tagger this import creates) and a missing skill stops the import.
+    taggers = [a["name"] for a in applets if a["type"] == SKILL_TAGGER and a["settings"].get("Skills")]
+    skills_unchecked, skills_to_create = False, []
+    if taggers:
+        existing_skills = None
+        if skills is not None:
+            try:
+                existing_skills = skills.names()
+            except ApiError as e:
+                log(f"WARNING: cannot list the target account's skills through the User Admin API ({e}); "
+                    "missing skills cannot be created")
+                skills = None
+        if existing_skills is None:
+            existing_skills = portal.list_skills(target_plan_id)
+        if existing_skills is None:
+            skills_unchecked = True
+            log("NOTE: the target account has no Skill Tagger to read its skills from; they are checked "
+                "after creating the applets, before saving any")
+        else:
+            skills_to_create = _resolve_skills(applets, existing_skills, log, skills is not None)
+        if skills_to_create:
+            log(f"NOTE: {len(skills_to_create)} skills the target account lacks {'would be' if dry_run else 'are'} "
+                f"created in it: {', '.join(skills_to_create)}")
     log(f"Checks passed: {len(applets)} applets from '{doc['plan']['name']}' into '{target_plan_name}'")
     missing_targets = {a["name"]: m for a in applets if a["type"] == DATA_ROUTER
                        and (m := data_router_missing_targets(a["settings"], a.get("next", {})))}
@@ -269,7 +356,13 @@ def import_plan(
         return []
 
     created: list[str] = []
+    created_skills: list[dict] = []
     try:
+        if skills_to_create:
+            log("0. Creating the missing skills")
+            for name in skills_to_create:
+                created_skills.append(skills.create(name))
+                log(f"   NEW SKILL created in the target account: '{name}'")
         if to_create:
             log(f"0. Making the data sources exist through '{AUX_SDS}'")
             if not aux_in_target:
@@ -282,12 +375,16 @@ def import_plan(
             created.append(a["name"])
             log(f"   {a['name']} ({a['type']})")
         by_name = {a["name"]: a for a in portal.list_applets(target_plan_id)["applets"]}
+        if skills_unchecked:
+            _resolve_skills(applets, portal.get_skill_tagger(by_name[taggers[0]]).get("AllSkills") or [], log, False)
 
         log("2. Saving settings and connections")
         for a in applets:
             nxt = a.get("next", {})
             if a["type"] == DATA_CONNECTOR:
                 portal.save_data_connector(target_plan_id, a["name"], a["settings"], nxt)
+            elif a["type"] == SKILL_TAGGER:
+                portal.save_skill_tagger(target_plan_id, a["name"], a["settings"], nxt)
             elif a["type"] == DATA_ROUTER and a["name"] in empty_routers:
                 log(f"   {a['name']}: empty Data Router, created and not saved")
                 continue
@@ -332,6 +429,12 @@ def import_plan(
                 portal.delete_applet(target_plan_id, name)
             except PortalError as e:
                 log(f"   could not delete '{name}': {e}")
+        for s in created_skills:
+            try:
+                skills.delete(s["skillId"])
+                log(f"   deleted the skill it created: '{s['skillName']}'")
+            except ApiError as e:
+                log(f"   could not delete the skill it created, '{s.get('skillName')}': {e}")
         raise
 
     log("4. Reading the copy back and comparing")

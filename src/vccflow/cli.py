@@ -19,6 +19,7 @@ from vccflow import callback_numbers
 from vccflow.callback_numbers import CallbackNumbersClient, CallbackNumbersError
 from vccflow import schedules
 from vccflow.schedules import SchedulesClient, SchedulesError
+from vccflow.skills import SkillsClient, SkillsError
 from vccflow.portal import PortalClient, PortalError, check_portal_account, remove_session
 from vccflow.portal_token import PortalTokenProvider
 
@@ -136,6 +137,12 @@ def cmd_list_custom_configurations(args: argparse.Namespace) -> None:
 def cmd_rename_callback_number(args: argparse.Namespace) -> None:
     saved = _callback_numbers(args).rename(args.number, args.name)
     print(f"Renamed {saved['clid']} ({saved.get('language')}, ID {saved['id']}) to '{saved['name']}' in '{args.account}'.")
+
+
+def cmd_list_skills(args: argparse.Namespace) -> None:
+    """The account's skills (User Admin API), sorted by name: name and ID."""
+    items = SkillsClient(load_account(args.account, Path(args.config))).list()
+    _print_json(sorted(({"name": s["skillName"], "id": s["skillId"]} for s in items), key=lambda s: s["name"].lower()))
 
 
 def _schedules(args: argparse.Namespace, account_name: str) -> SchedulesClient:
@@ -271,7 +278,8 @@ def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, ar
     dry_run = args.dry_run
     diffs = importer.import_plan(portal, source, plan_id, plan_name, dry_run=dry_run,
                                  skip_unsupported=args.skip_unsupported,
-                                 require_data_sources=args.require_data_sources)
+                                 require_data_sources=args.require_data_sources,
+                                 skills=SkillsClient(portal.account))
     if dry_run:
         print("Dry run: nothing was changed.")
     elif diffs:
@@ -445,6 +453,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("number", help="the entry's ID, its current name, or its number (if it has one entry only)")
     p.add_argument("name", help="new name, up to 50 characters")
     p.set_defaults(func=cmd_rename_callback_number)
+    p = with_account(sub.add_parser("list-skills", help="list the account's skills (User Admin API; users:read)"))
+    p.set_defaults(func=cmd_list_skills)
     p = with_account(sub.add_parser("list-schedules", help="list schedules in full (API; admin:read)"))
     p.add_argument("--summary", action="store_true", help="one line per schedule")
     p.set_defaults(func=cmd_list_schedules)
@@ -565,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         if remove_session(e.account):
             print(f"The saved login for '{e.account.name}' was removed.", file=sys.stderr)
         return 1
-    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, SchedulesError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, SchedulesError, SkillsError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

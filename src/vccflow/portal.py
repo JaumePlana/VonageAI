@@ -33,6 +33,9 @@ DC_NEXT_KEYS = ("NextApplet", "NextAppletFailure", "NextAppletInterfaceFailure",
 # Data Router (DataRouter page, an MVC form): rule data types, all recorded (dataRouter*.har).
 # 3 is True/False ("equals" only; its value is RightHandFixedBooleanValue).
 DR_RECORDED_TYPES = {0: "text", 1: "number", 2: "decimal", 3: "true/false", 4: "date"}
+# Skill Tagger (SkillPersonalQueueTagger page, an MVC form; skillTagger.har).
+SKILL_NECESSITY = {1: "optional", 2: "mandatory", 3: "mandatory for a time"}
+SKILL_TIME_KEYS = ("RequiredDays", "RequiredHours", "RequiredMinutes", "RequiredSeconds")
 DR_BOOLEAN = 3
 # The plan page (applications.asp) lists every plan; the second cell of the plan's row
 # links the initial applet, or says "WARNING initial applet not selected".
@@ -126,7 +129,8 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
 
     settings are the exported page-model values (see export.py), nxt the NextApplet* names.
     Covers the cases recorded so far: Web Service calls, JavaScript (dataRouter4.har), and
-    Salesforce get (match by CLID or data source, raw SOQL, one or several records) and update.
+    Salesforce get (match by CLID or data source, raw SOQL, one or several records), update and
+    create (field values from data sources; IVR Slots are refused).
     """
     provider, action = settings.get("DataProvider"), settings.get("Action")
     form = [("DataProvider", provider), ("Action", action)]
@@ -152,8 +156,16 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
             if crm.get("MaxRecords"):
                 form += [("RetrieveMultiple", "on"), ("MaxRecords", str(crm["MaxRecords"]))]
             form += [("fieldToRetrieveSelectBox", ""), ("SerialisedResponseItems", _compact(settings.get("ResponseItems") or []))]
-    elif provider == "Salesforce" and action == "UpdateSalesforceObject":
+    elif provider == "Salesforce" and action in ("UpdateSalesforceObject", "CreateSalesforceObject"):
+        # Update and create post the same fields (dataconnector.har, dataconnector_createSFRecord.har):
+        # the object, and each field with the data source its value comes from.
+        if not settings.get("MatchObjectName"):
+            raise PortalError("a Salesforce update or create needs an object (MatchObjectName); it cannot be saved")
         params = (settings.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []
+        slots = [p.get("CrmField") for p in params if p.get("DataSourceType") != 0]
+        if slots:
+            raise PortalError(f"Salesforce fields set from an IVR Slot are not supported: {', '.join(map(str, slots))}; "
+                              "only values from data sources can be saved")
         items = [{"crmField": p["CrmField"], "dataSourceType": p["DataSourceType"], "value": p["Value"]} for p in params]
         form += [("MatchObjectName", settings.get("MatchObjectName") or ""),
                  ("fieldToPopulateSelectBox", ""), ("SerialisedResponseItems", _compact(items))]
@@ -164,6 +176,71 @@ def data_connector_form(settings: dict, nxt: dict) -> list[tuple[str, str]]:
     form += [(k, nxt.get(k) or "") for k in DC_NEXT_KEYS if k != "NextAppletMultipleMatch"]
     if nxt.get("NextAppletMultipleMatch"):
         form.append(("NextAppletMultipleMatch", nxt["NextAppletMultipleMatch"]))
+    return form
+
+
+def extract_skill_tagger(html: str) -> dict:
+    """The Skill Tagger page model (SkillPersonalQueueTagger page): skills, dynamic skills,
+    personal queue data sources, NextApplet, and the account's lookups (AllSkills, AllMetabaseEntries)."""
+    for raw in PAGE_MODEL.findall(html):
+        model = json.loads(html_lib.unescape(raw.replace("\\'", "'")))
+        if isinstance(model, dict) and "Skills" in model and "DynamicSkills" in model:
+            return model
+    raise PortalError("Skill Tagger page has no Skills model; the page format may have changed")
+
+
+def _skill_requirement(skill: dict, where: str) -> dict:
+    """A skill requirement as the page posts it; Necessity 1 optional, 2 mandatory, 3 mandatory for a time."""
+    necessity = skill.get("Necessity")
+    if necessity not in SKILL_NECESSITY:
+        raise PortalError(f"{where}: necessity {necessity!r} is unknown (recorded: "
+                          f"{', '.join(f'{k} {v}' for k, v in SKILL_NECESSITY.items())}); it cannot be saved")
+    if not skill.get("Name"):
+        raise PortalError(f"{where} has no name; it cannot be saved")
+    return {"Name": skill["Name"], "Necessity": necessity,
+            **{k: int(skill.get(k) or 0) for k in SKILL_TIME_KEYS}}
+
+
+def skill_description(skill: dict) -> str:
+    """The text the page posts with a dynamic skill (Nvm.SkillTagger.SkillDescription in
+    SkillPersonalQueueTagger.js): " is optional", " is mandatory", " is mandatory for 1 day 8 minutes "."""
+    if skill["Necessity"] == 1:
+        return " is optional"
+    if skill["Necessity"] == 2:
+        return " is mandatory"
+    units = zip((skill.get(k) or 0 for k in SKILL_TIME_KEYS), ("day", "hour", "minute", "second"))
+    return " is mandatory for " + "".join(f"{n} {unit}{'' if n == 1 else 's'} " for n, unit in units if n > 0)
+
+
+def skill_tagger_form(settings: dict, nxt: dict, friendly_names: dict | None = None) -> list[tuple[str, str]]:
+    """Build the Skill Tagger form post, as its page sends it on save (skillTagger.har).
+
+    Static skills are posted by name (Skills[i].*), dynamic skills (a data source's value is the
+    skill) as SerialisedDynamicSkills JSON with the data source's display name (friendly_names,
+    the page's AllMetabaseEntries). The logged-in and logged-out timeouts are posted only with
+    an agent ID data source: without one the page does not offer them.
+    """
+    if settings.get("InterruptAgentWhilstAway"):
+        raise PortalError("'Interrupt agent whilst away' on has not been recorded yet; it cannot be saved")
+    agent = settings.get("AgentIdDataSource") or ""
+    timeouts = [settings.get(k) or "" for k in ("LoggedInTimeoutDataSource", "LoggedOutTimeoutDataSource")]
+    if not agent and any(timeouts):
+        raise PortalError("the logged-in and logged-out timeouts need an agent ID data source; it cannot be saved")
+    form = [("ClearAllSkills", "true")] if settings.get("ClearAllSkills") else []
+    form.append(("AgentIdDataSource", agent))
+    if agent:
+        form += [("LoggedInTimeoutDataSource", timeouts[0]), ("LoggedOutTimeoutDataSource", timeouts[1])]
+    form.append(("InterruptAgentWhilstAway", "False"))
+    for i, skill in enumerate(settings.get("Skills") or []):
+        s = _skill_requirement(skill, f"skill {i + 1}")
+        form += [(f"Skills[{i}].{k}", str(v)) for k, v in s.items()]
+    dynamic = []
+    for i, skill in enumerate(settings.get("DynamicSkills") or []):
+        s = _skill_requirement(skill, f"dynamic skill {i + 1}")
+        s["FriendlyName"] = (friendly_names or {}).get(s["Name"], s["Name"])
+        s["Description"] = skill_description(s)
+        dynamic.append(s)
+    form += [("SerialisedDynamicSkills", _compact(dynamic)), ("NextApplet", nxt.get("NextApplet") or "")]
     return form
 
 
@@ -460,6 +537,10 @@ class PortalClient:
         """Return extract_data_router() for a Data Router from list_applets()."""
         return extract_data_router(self._request("GET", applet["configUrl"]).text)
 
+    def get_skill_tagger(self, applet: dict) -> dict:
+        """Return extract_skill_tagger() for a Skill Tagger from list_applets()."""
+        return extract_skill_tagger(self._request("GET", applet["configUrl"]).text)
+
     def get_applet_form(self, applet: dict) -> dict:
         """Editor page fields of an applet from list_applets(), for types without a parsed format."""
         return extract_form_values(self._request("GET", applet["configUrl"]).text)
@@ -514,6 +595,19 @@ class PortalClient:
             if not (applet.get("configUrl") or "").startswith("DataRetriever"):
                 return None
             return self.get_data_connector(applet)["model"].get("CustomAccountConfigs")
+
+        names = self._first_from_applets(plan_id, read)
+        return None if names is None else list(names)
+
+    def list_skills(self, plan_id: str | None = None) -> list[str] | None:
+        """The account's skill names, as the Skill Tagger page lists them (AllSkills).
+
+        Read from the first Skill Tagger found, in plan_id first. None if the account has none.
+        """
+        def read(_pid: str, applet: dict) -> Any:
+            if not (applet.get("configUrl") or "").startswith("SkillPersonalQueueTagger"):
+                return None
+            return self.get_skill_tagger(applet).get("AllSkills")
 
         names = self._first_from_applets(plan_id, read)
         return None if names is None else list(names)
@@ -604,6 +698,28 @@ class PortalClient:
         if any(errors):
             raise PortalError(f"Saving Data Connector '{name}' was refused: {'; '.join(e for e in errors if e)}")
         return extract_data_connector(resp.text)
+
+    def save_skill_tagger(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
+        """Save a Skill Tagger's skills, personal queue and next applet, as its page's save does.
+
+        Returns the saved page parsed by extract_skill_tagger(), for reading back.
+        """
+        self._require_writes()
+        skill_tagger_form(settings, nxt)  # fails before any request if unsupported
+        page_url = f"SkillPersonalQueueTagger?phonenum={quote(plan_id)}&myapp={quote(name)}&application=SkillTagger"
+        page = self._request("GET", page_url).text
+        token = re.search(INPUT_VALUE.format(name="__RequestVerificationToken"), page)
+        if not token:
+            raise PortalError(f"Skill Tagger page for '{name}' has no form token")
+        friendly = extract_skill_tagger(page).get("AllMetabaseEntries") or {}
+        form = skill_tagger_form(settings, nxt, friendly)
+        resp = self._request("POST", f"SkillPersonalQueueTagger?phoneNum={quote(plan_id)}&myApp={quote(name)}",
+                             headers={"Referer": f"{self.base}/{page_url}"},
+                             data=[("__RequestVerificationToken", html_lib.unescape(token.group(1))), *form])
+        errors = [re.sub(r"<[^>]+>|\s+", " ", e).strip() for e in VALIDATION_ERRORS.findall(resp.text)]
+        if any(errors):
+            raise PortalError(f"Saving Skill Tagger '{name}' was refused: {'; '.join(e for e in errors if e)}")
+        return extract_skill_tagger(resp.text)
 
     def save_data_router(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
         """Save a Data Router's rules and default applet, as its page's save does.

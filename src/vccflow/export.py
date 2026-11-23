@@ -22,10 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from vccflow.portal import PortalClient, PortalError
+from vccflow.portal import SKILL_TIME_KEYS, PortalClient, PortalError
 
 FORMAT = "vccflow.plan/1"
 DATA_ROUTER = "DataRouter"
+SKILL_TAGGER = "SkillTagger"
+# Skill Tagger personal queue settings: each names a data source.
+SKILL_TAGGER_DATA_SOURCES = ("AgentIdDataSource", "LoggedInTimeoutDataSource", "LoggedOutTimeoutDataSource")
 # Plan-level settings saved in the export. They are reported, not imported: a copy leaves them as they are.
 PLAN_SETTINGS = ("reportingGroupName", "displayInAgentInterface", "outboundClidBehaviour", "outboundClid")
 
@@ -88,6 +91,28 @@ def split_connections(props: dict, names_by_id: dict | None = None) -> tuple[dic
         else:
             settings[k] = v
     return settings, nxt
+
+
+def split_skill_tagger(model: dict) -> tuple[dict, dict]:
+    """Return (settings, next) for a Skill Tagger page model.
+
+    Skills are kept by name (VCC posts them by name; skill IDs are not on the page), dynamic
+    skills by data source, each with its necessity and time; both sorted by name, since the
+    order means nothing to VCC. The account's lookups (AllSkills, AllMetabaseEntries...) are left out.
+    """
+    def requirements(items: list | None) -> list[dict]:
+        kept = [{"Name": s.get("Name"), "Necessity": s.get("Necessity"),
+                 **{k: int(s.get(k) or 0) for k in SKILL_TIME_KEYS}} for s in items or []]
+        return sorted(kept, key=lambda s: (str(s["Name"]).lower(), str(s["Name"])))
+
+    settings = {
+        "ClearAllSkills": bool(model.get("ClearAllSkills")),
+        "Skills": requirements(model.get("Skills")),
+        "DynamicSkills": requirements(model.get("DynamicSkills")),
+        **{k: model.get(k) or "" for k in SKILL_TAGGER_DATA_SOURCES},
+        "InterruptAgentWhilstAway": bool(model.get("InterruptAgentWhilstAway")),
+    }
+    return settings, ({"NextApplet": model["NextApplet"]} if model.get("NextApplet") else {})
 
 
 def option_labels(metadata: Any) -> dict[str, str]:
@@ -212,14 +237,17 @@ def data_sources_created(applet: dict) -> set[str]:
     """Data sources the applet sets, so they need not exist in the target account beforehand.
 
     Set Data Source keys; Data Connector outputs: Web Service <Destination> and
-    <ResponseCodeDestination>, and the fields a Salesforce get returns ("Object|Field",
-    or "Object(n)|Field" when several records are retrieved; raw SOQL: the selected fields).
+    <ResponseCodeDestination>, the fields a Salesforce get returns ("Object|Field",
+    or "Object(n)|Field" when several records are retrieved; raw SOQL: the selected fields),
+    and the ID of the record a Salesforce create makes ("Object|Id").
     """
     s = applet.get("settings", {})
     found = {ds["Key"] for ds in s.get("DataSources") or [] if ds.get("Key")}
     for text in _strings(s):
         found.update(x.strip() for x in XML_DESTINATION.findall(text))
     crm = s.get("CrmRetrievalViewModel") or {}
+    if s.get("Action") == "CreateSalesforceObject":  # the new record's ID ("Account|Id")
+        found.update(f for f in s.get("ResponseItems") or [] if f)
     if s.get("Action") == "GetSalesforceData":
         fields = list(s.get("ResponseItems") or [])
         soql = SOQL_SELECT.search(crm.get("Soql") or "") if crm.get("UseRawSoql") else None
@@ -237,8 +265,8 @@ def data_sources_created(applet: dict) -> set[str]:
 
 def data_sources_used(applet: dict) -> set[str]:
     """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
-    a Data Router rule's data source, a Salesforce match data source and the values a
-    Salesforce update writes."""
+    a Data Router rule's data source, a Salesforce match data source, the values a
+    Salesforce update or create writes, and a Skill Tagger's dynamic skills and personal queue."""
     s = applet.get("settings", {})
     found = set()
     for text in _strings(s):
@@ -257,6 +285,9 @@ def data_sources_used(applet: dict) -> set[str]:
     for p in (s.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
         if p.get("DataSourceType") == 0 and p.get("Value"):
             found.add(p["Value"])
+    if applet.get("type") == SKILL_TAGGER:  # dynamic skills and the personal queue read data sources
+        found.update(d["Name"] for d in s.get("DynamicSkills") or [] if d.get("Name"))
+        found.update(s[k] for k in SKILL_TAGGER_DATA_SOURCES if s.get(k))
     return found
 
 
@@ -322,6 +353,11 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         settings.update(dc["fields"])
         entry["settings"] = settings
         entry["next"] = {k: v for k, v in model.items() if _is_next_key(k) and v}
+        return entry
+
+    if config_url.startswith("SkillPersonalQueueTagger"):
+        entry["type"] = SKILL_TAGGER
+        entry["settings"], entry["next"] = split_skill_tagger(portal.get_skill_tagger(applet))
         return entry
 
     if config_url.startswith("DataRouter"):
