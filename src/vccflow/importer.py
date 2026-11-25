@@ -20,8 +20,9 @@ from typing import Callable
 from vccflow import export
 from vccflow.scoped_api import ApiError
 from vccflow.skills import SkillsClient
-from vccflow.portal import (MAX_MEDIA_BYTES, PortalClient, PortalError, data_connector_form, data_router_form,
-                            data_router_missing_targets, skill_tagger_form)
+from vccflow.portal import (MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError, check_shim,
+                            data_connector_form, data_router_form, data_router_missing_targets, shim_configured,
+                            skill_tagger_form)
 
 DATA_CONNECTOR = "DataRetriever"
 DATA_ROUTER = export.DATA_ROUTER
@@ -52,7 +53,7 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -62,6 +63,11 @@ def unsupported_reason(applet: dict) -> str | None:
     if applet["type"] == SKILL_TAGGER:
         try:
             skill_tagger_form(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+    if applet["type"] == SHIM:
+        try:
+            check_shim(applet["settings"])
         except PortalError as e:
             return str(e)
     if applet["type"] == DATA_ROUTER and applet["settings"].get("RoutingRules"):  # no rules: created, not saved
@@ -196,6 +202,42 @@ def _resolve_skills(applets: list[dict], existing: list[str], log: Callable[[str
                           "the User Admin API is not available with users:write for this account")
     use_skill_spellings(applets, spellings)
     return list(missing)
+
+
+def unsaved_routes(applets: list[dict], plans: list[dict], applets_of: Callable[[str], list[str]],
+                   target_plan_id: str) -> dict[str, str]:
+    """Route to Interaction Plan applets that cannot be saved in the target: name -> why.
+
+    VCC saves one only with its Interaction Plan and applet (or its data source): not with the
+    failure applet alone ("Please select an Interaction Plan."). The plan is looked up by name
+    (plans: list_plans()), then the applet by name in it (applets_of(plan ID)). The plan being
+    copied into is never offered as a target. A data source is not checked by VCC: always saved.
+    """
+    by_name: dict[str, list[dict]] = {}
+    for p in plans:
+        by_name.setdefault(p["interactionPlanName"], []).append(p)
+    unsaved = {}
+    for a in applets:
+        if a.get("type") != SHIM:
+            continue
+        s = a["settings"]
+        if not shim_configured(s):
+            unsaved[a["name"]] = "it is not configured in the source either"
+            continue
+        if s["RouteType"] != SHIM_TO_PLAN:
+            continue
+        found = by_name.get(s["TargetPlan"], [])
+        if not found:
+            unsaved[a["name"]] = f"Interaction Plan '{s['TargetPlan']}' does not exist in the target account"
+        elif len(found) > 1:
+            unsaved[a["name"]] = f"the target account has {len(found)} Interaction Plans named '{s['TargetPlan']}'"
+        elif found[0]["interactionPlanId"] == target_plan_id:
+            unsaved[a["name"]] = (f"it routes to Interaction Plan '{s['TargetPlan']}', the plan it is copied into, "
+                                  "which VCC does not allow")
+        elif s["TargetApplet"] not in applets_of(found[0]["interactionPlanId"]):
+            unsaved[a["name"]] = (f"applet '{s['TargetApplet']}' does not exist in Interaction Plan "
+                                  f"'{s['TargetPlan']}' of the target account")
+    return unsaved
 
 
 def _set_path(props: dict, path: str, media_id: int) -> None:
@@ -344,6 +386,19 @@ def import_plan(
     for name, m in missing_targets.items():
         log(f"WARNING: Data Router '{name}' {verb} copied with no destination applet for: {', '.join(m)}. "
             "Set them in the portal.")
+    routes = [a for a in applets if a["type"] == SHIM]
+    unsaved = {}
+    if routes:
+        unsaved = unsaved_routes(routes, portal.list_plans(),
+                                 lambda pid: [x["name"] for x in portal.list_applets(pid).get("applets", [])],
+                                 target_plan_id)
+    for a in routes:
+        if a["name"] in unsaved:
+            failure = a.get("next", {}).get("FailureApplet")
+            log(f"WARNING: Route to Interaction Plan '{a['name']}' {verb} copied without its settings: "
+                f"{unsaved[a['name']]}. VCC does not save it without its Interaction Plan and applet (or data source)"
+                + (f", so its failure applet '{failure}' is not set either" if failure else "")
+                + ". Set them in the portal.")
     if to_create:
         where = "added to the existing" if aux_in_target else "set in a new"
         log(f"NOTE: the {len(to_create)} missing data sources {'would be' if dry_run else 'are'} {where} auxiliary "
@@ -385,6 +440,11 @@ def import_plan(
                 portal.save_data_connector(target_plan_id, a["name"], a["settings"], nxt)
             elif a["type"] == SKILL_TAGGER:
                 portal.save_skill_tagger(target_plan_id, a["name"], a["settings"], nxt)
+            elif a["type"] == SHIM and a["name"] in unsaved:
+                log(f"   {a['name']}: Route to Interaction Plan created without its settings (see the warning above)")
+                continue
+            elif a["type"] == SHIM:
+                portal.save_shim(target_plan_id, a["name"], a["settings"], nxt)
             elif a["type"] == DATA_ROUTER and a["name"] in empty_routers:
                 log(f"   {a['name']}: empty Data Router, created and not saved")
                 continue
@@ -444,6 +504,11 @@ def import_plan(
     copy["applets"] = [a for a in copy["applets"] if a["name"] in {x["name"] for x in applets}]
     notes: list[str] = []
     diffs = compare(doc, copy, notes)
+    # Routes left without their settings were warned about above; their difference is expected.
+    diffs = [d for d in diffs if not any(d.startswith(f"'{n}' ") for n in unsaved)]
+    if unsaved:
+        log(f"NOTE: the comparison leaves out the {len(unsaved)} Route to Interaction Plan applets copied without "
+            f"their settings (see the warnings above): {', '.join(sorted(unsaved))}")
     for n in notes:
         log(f"NOTE: {n}")
     return diffs

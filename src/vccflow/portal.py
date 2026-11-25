@@ -308,6 +308,130 @@ def data_router_missing_targets(settings: dict, nxt: dict) -> list[str]:
     return missing
 
 
+# --- Route to Interaction Plan (appletType "Shim"; shim.aspx, an ASP.NET WebForms page) ---
+
+SHIM = "Shim"
+SHIM_TO_PLAN, SHIM_TO_DATA_SOURCE = "Interaction plan", "Data source"
+SHIM_TYPE, SHIM_PLAN, SHIM_APPLET, SHIM_DATA_SOURCE, SHIM_FAILURE = (
+    f"datagrid$ctl02${n}" for n in ("ddShimType", "ddDialledNbr", "ddShimApp", "tbDataSourceName", "ddFailureApplet"))
+# "Transfer IVR data / DDI / Agent Id" check boxes: they copy IVR slots, not recorded (out of the usual scope).
+SHIM_IVR_BOXES = {"TransferIvrData": "datagrid3$ctl02$IVR3", "TransferDdi": "datagrid1$ctl02$IVR",
+                  "TransferAgentId": "datagrid2$ctl02$IVR2"}
+# VCC refuses any other form ("Please provide data source name in correct notation => $(dataSourceName)"),
+# but does not check that the data source exists ("$(SomethignNew)" was saved).
+SHIM_DATA_SOURCE_NOTATION = re.compile(r"\$\([^()]+\)")
+SHIM_MESSAGE = re.compile(r'<span id="myLabel1"[^>]*>(.*?)</span>', re.S)
+
+
+class _WebForm(HTMLParser):
+    """What a browser posts from a WebForms page (hidden state included, disabled fields not),
+    and each select's options as (value, text)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.fields: dict[str, str] = {}
+        self.options: dict[str, list[tuple[str, str]]] = {}
+        self._select: str | None = None
+        self._selected: str | None = None
+        self._option: list | None = None  # [value, text parts]
+
+    def _end_option(self) -> None:
+        if self._option is not None and self._select:
+            self.options[self._select].append((self._option[0], " ".join("".join(self._option[1]).split())))
+            self._option = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "input" and "disabled" not in a and a.get("name"):
+            kind = (a.get("type") or "text").lower()
+            if kind in ("submit", "button", "image", "reset", "file"):
+                return
+            if kind in ("checkbox", "radio") and "checked" not in a:
+                return
+            self.fields[a["name"]] = a.get("value") if a.get("value") is not None else ("on" if kind == "checkbox" else "")
+        elif tag == "select":
+            self._select = a.get("name") if "disabled" not in a else None
+            self._selected = None
+            if self._select:
+                self.options[self._select] = []
+        elif tag == "option" and self._select:
+            self._end_option()
+            self._option = [a.get("value") or "", []]
+            if "selected" in a:
+                self._selected = a.get("value") or ""
+
+    def handle_endtag(self, tag):
+        if tag == "option":
+            self._end_option()
+        elif tag == "select" and self._select:
+            self._end_option()
+            opts = self.options[self._select]
+            if self._selected is not None:
+                self.fields[self._select] = self._selected
+            elif opts:  # a browser posts the first option when none is selected
+                self.fields[self._select] = opts[0][0]
+            self._select = None
+
+    def handle_data(self, data):
+        if self._option is not None:
+            self._option[1].append(data)
+
+
+def _web_form(html: str) -> _WebForm:
+    form = _WebForm()
+    form.feed(html)
+    form.close()
+    return form
+
+
+def extract_shim(html: str) -> dict:
+    """A Route to Interaction Plan page: its settings, with the target plan by name (option text).
+
+    Returns {"RouteType", "TargetPlan", "TargetPlanId", "TargetApplet", "DataSourceName",
+    "FailureApplet", "Message", and each SHIM_IVR_BOXES key (True when checked)}.
+    """
+    form = _web_form(html)
+    if SHIM_TYPE not in form.fields:
+        raise PortalError("Not a Route to Interaction Plan page (no route type field); the page format may have changed")
+    f = form.fields
+    plan_id = f.get(SHIM_PLAN, "")
+    plan = next((t for v, t in form.options.get(SHIM_PLAN, []) if v and v == plan_id), "")
+    message = SHIM_MESSAGE.search(html)
+    return {
+        "RouteType": f[SHIM_TYPE],
+        "TargetPlan": plan,
+        "TargetPlanId": plan_id if plan else "",
+        "TargetApplet": f.get(SHIM_APPLET, "") if plan else "",
+        "DataSourceName": f.get(SHIM_DATA_SOURCE, ""),
+        "FailureApplet": f.get(SHIM_FAILURE, ""),
+        "Message": html_lib.unescape(re.sub(r"<[^>]+>", " ", message.group(1))).strip() if message else "",
+        **{k: box in f for k, box in SHIM_IVR_BOXES.items()},
+    }
+
+
+def shim_configured(settings: dict) -> bool:
+    """Whether a Route to Interaction Plan has what VCC needs to save it: a plan and applet, or a data source.
+    The failure applet alone is not enough ("Please select an Interaction Plan.")."""
+    if settings.get("RouteType") == SHIM_TO_DATA_SOURCE:
+        return bool(settings.get("DataSourceName"))
+    return bool(settings.get("TargetPlan") and settings.get("TargetApplet"))
+
+
+def check_shim(settings: dict) -> None:
+    """Refuse what was not recorded or what VCC would refuse, before any request."""
+    route = settings.get("RouteType")
+    if route not in (SHIM_TO_PLAN, SHIM_TO_DATA_SOURCE):
+        raise PortalError(f"Route to Interaction Plan type {route!r} has not been recorded yet; it cannot be saved")
+    on = [k for k in SHIM_IVR_BOXES if settings.get(k)]
+    if on:
+        raise PortalError(f"Route to Interaction Plan with IVR data transfer ({', '.join(on)}) is not supported: "
+                          "it copies IVR slots")
+    name = settings.get("DataSourceName") or ""
+    if route == SHIM_TO_DATA_SOURCE and name and not SHIM_DATA_SOURCE_NOTATION.fullmatch(name):
+        raise PortalError(f"Route to Interaction Plan data source {name!r} is not in the $(dataSourceName) notation "
+                          "VCC requires")
+
+
 def extract_initial_applet(html: str, plan_id: str) -> str | None:
     m = re.search(INITIAL_APPLET.format(plan_id=re.escape(plan_id)), html, re.S)
     if not m:
@@ -541,6 +665,10 @@ class PortalClient:
         """Return extract_skill_tagger() for a Skill Tagger from list_applets()."""
         return extract_skill_tagger(self._request("GET", applet["configUrl"]).text)
 
+    def get_shim(self, applet: dict) -> dict:
+        """Return extract_shim() for a Route to Interaction Plan from list_applets()."""
+        return extract_shim(self._request("GET", applet["configUrl"]).text)
+
     def get_applet_form(self, applet: dict) -> dict:
         """Editor page fields of an applet from list_applets(), for types without a parsed format."""
         return extract_form_values(self._request("GET", applet["configUrl"]).text)
@@ -742,6 +870,84 @@ class PortalClient:
         if "appletsaved=true" not in location.lower():
             raise PortalError(f"Saving Data Router '{name}' was not confirmed: redirected to {location}")
         return extract_data_router(self._request("GET", f"{page_url}&appletSaved=True").text)
+
+    def save_shim(self, plan_id: str, name: str, settings: dict, nxt: dict) -> dict:
+        """Save a Route to Interaction Plan as its page does (routeToInteractionPlan.har).
+
+        A WebForms page: every change posts the whole form back (with its __VIEWSTATE) and the
+        page answers with the new state. As in the browser, the route type is chosen first, then the
+        target plan, whose applets the answer lists; "Update" saves, redirecting to updated.asp. A
+        refused save comes back as the page with its message ("Please select an Interaction Plan.").
+        The plan is chosen by name; the plan being edited is never offered. Returns extract_shim()
+        of the saved page.
+        """
+        self._require_writes()
+        check_shim(settings)
+        if not shim_configured(settings):
+            raise PortalError(f"Route to Interaction Plan '{name}' has no Interaction Plan and applet, or data "
+                              "source: VCC does not save it")
+        url = f"shim.aspx?phonenum={quote(plan_id)}&myapp={quote(name)}&application=Shim"
+        headers = {"Referer": f"{self.base}/{url}"}
+
+        def post(form: _WebForm, target: str = "", save: bool = False) -> requests.Response:
+            data = {**form.fields, "__EVENTTARGET": target, "__EVENTARGUMENT": ""}
+            if save:
+                data["Update"] = "Update"
+            resp = self._request("POST", url, expect_redirect=None, headers=headers, data=data)
+            if resp.is_redirect and not save:
+                raise PortalError(f"Route to Interaction Plan '{name}': changing {target} left the page "
+                                  f"({resp.headers.get('Location')})")
+            return resp
+
+        def choose(form: _WebForm, field: str, value: str) -> _WebForm:
+            form.fields[field] = value
+            return _web_form(post(form, field).text)
+
+        form = _web_form(self._request("GET", url).text)
+        if SHIM_TYPE not in form.fields:
+            raise PortalError(f"Route to Interaction Plan page for '{name}' has no route type field")
+        route = settings["RouteType"]
+        if form.fields[SHIM_TYPE] != route:
+            form = choose(form, SHIM_TYPE, route)
+        if route == SHIM_TO_PLAN:
+            plans = [v for v, t in form.options.get(SHIM_PLAN, []) if v and t == settings["TargetPlan"]]
+            if len(plans) != 1:
+                why = "is not offered (it is missing, or it is the plan being edited)" if not plans else "is ambiguous"
+                raise PortalError(f"Route to Interaction Plan '{name}': Interaction Plan '{settings['TargetPlan']}' {why}")
+            form = choose(form, SHIM_PLAN, plans[0])
+            if settings["TargetApplet"] not in [v for v, _ in form.options.get(SHIM_APPLET, [])]:
+                raise PortalError(f"Route to Interaction Plan '{name}': applet '{settings['TargetApplet']}' is not in "
+                                  f"Interaction Plan '{settings['TargetPlan']}'")
+            form.fields[SHIM_APPLET] = settings["TargetApplet"]
+        else:
+            form.fields[SHIM_DATA_SOURCE] = settings["DataSourceName"]
+        failure = nxt.get("FailureApplet") or ""
+        if failure not in [v for v, _ in form.options.get(SHIM_FAILURE, [])]:
+            raise PortalError(f"Route to Interaction Plan '{name}': failure applet '{failure}' is not offered")
+        form.fields[SHIM_FAILURE] = failure
+        resp = post(form, save=True)
+        if not resp.is_redirect:
+            reason = extract_shim(resp.text)["Message"] or "no reason shown on the page"
+            raise PortalError(f"Saving Route to Interaction Plan '{name}' was refused: {reason}")
+        location = resp.headers.get("Location", "")
+        if "/apps/updated.asp" not in location.lower():
+            raise PortalError(f"Saving Route to Interaction Plan '{name}' was not confirmed: redirected to {location}")
+        # The page only validates: the redirect carries the values (name=shim&dd1=<plan ID or $(data
+        # source)>&dd2=<applet>&nextAppletFail=<applet>) and updated.asp, a classic ASP page, saves them
+        # (found live 2026-11-25: without opening it, nothing was saved).
+        done = self._request("GET", location.split("/apps/", 1)[1]).text
+        if "successfully updated" not in done:
+            status = re.search(r'id="statusMessage"[^>]*>(.*?)</td>', done, re.S)
+            message = re.sub(r"<[^>]+>|\s+", " ", status.group(1)).strip() if status else "no message"
+            raise PortalError(f"Saving Route to Interaction Plan '{name}' was not confirmed: {message}")
+        saved = extract_shim(self._request("GET", url).text)
+        want = {"RouteType": route, "FailureApplet": failure, **(
+            {"TargetPlan": settings["TargetPlan"], "TargetApplet": settings["TargetApplet"]} if route == SHIM_TO_PLAN
+            else {"DataSourceName": settings["DataSourceName"]})}
+        wrong = [f"{k} {saved[k]!r} instead of {v!r}" for k, v in want.items() if saved[k] != v]
+        if wrong:
+            raise PortalError(f"Route to Interaction Plan '{name}' reads back with {', '.join(wrong)}")
+        return saved
 
     def set_initial_applet(self, plan_id: str, name: str) -> None:
         """Set the applet the plan starts with.

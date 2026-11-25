@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from vccflow.portal import SKILL_TIME_KEYS, PortalClient, PortalError
+from vccflow.portal import SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS, PortalClient, PortalError
 
 FORMAT = "vccflow.plan/1"
 DATA_ROUTER = "DataRouter"
@@ -113,6 +113,23 @@ def split_skill_tagger(model: dict) -> tuple[dict, dict]:
         "InterruptAgentWhilstAway": bool(model.get("InterruptAgentWhilstAway")),
     }
     return settings, ({"NextApplet": model["NextApplet"]} if model.get("NextApplet") else {})
+
+
+def split_shim(page: dict) -> tuple[dict, dict]:
+    """Return (settings, next) for a Route to Interaction Plan page (extract_shim()).
+
+    The target plan and its applet are kept by name: plan IDs differ per account, and the applet is
+    in the other plan, so it is a setting, not a connection. The data source is kept as written,
+    "$(Name)". The failure applet is in this plan: next["FailureApplet"].
+    """
+    settings = {
+        "RouteType": page["RouteType"],
+        "TargetPlan": page["TargetPlan"],
+        "TargetApplet": page["TargetApplet"],
+        "DataSourceName": page["DataSourceName"],
+        **{k: bool(page.get(k)) for k in SHIM_IVR_BOXES},
+    }
+    return settings, ({"FailureApplet": page["FailureApplet"]} if page.get("FailureApplet") else {})
 
 
 def option_labels(metadata: Any) -> dict[str, str]:
@@ -358,6 +375,11 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
     if config_url.startswith("SkillPersonalQueueTagger"):
         entry["type"] = SKILL_TAGGER
         entry["settings"], entry["next"] = split_skill_tagger(portal.get_skill_tagger(applet))
+        return entry
+
+    if config_url.lower().startswith("shim.aspx"):
+        entry["type"] = SHIM
+        entry["settings"], entry["next"] = split_shim(portal.get_shim(applet))
         return entry
 
     if config_url.startswith("DataRouter"):
