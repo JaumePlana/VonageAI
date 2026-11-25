@@ -56,3 +56,47 @@ class SkillsClient(ScopedApi):
     def delete(self, skill_id: str) -> None:
         self._require_writes()
         self._call("DELETE", f"{self.base}/{skill_id}", WRITE_SCOPES, headers=ACCEPT_V4)
+
+
+# Groups: the same API (userAdminAPI.har). GET /useradmin/groups?page=1&limit=500 lists
+# {"groups": [{"groupId", "groupName", "groupMaxUnexpectedTime", "groupMaxWrapUpTime", "groupDisplayId"}]};
+# POST /useradmin/groups/ {"groupDisplayId", "groupName", "groupMaxUnexpectedTime", "groupMaxWrapUpTime"}
+# creates one ("groupDisplayId": "" lets VCC choose it); DELETE /useradmin/groups/{groupId} answers 200.
+# VCC Admin offered 500 seconds for both maximum times when the user created a group with defaults.
+GROUP_DEFAULT_MAX_TIME = 500
+
+
+class GroupsError(ApiError):
+    pass
+
+
+class GroupsClient(ScopedApi):
+    error = GroupsError
+    what = "groups"
+
+    def __init__(self, account: Account, *args, **kwargs):
+        super().__init__(account, *args, **kwargs)
+        self.base = f"{account.manager_api_url}/useradmin/groups"
+
+    def list(self) -> list[dict]:
+        """All the account's groups."""
+        groups, page = [], 1
+        while True:
+            body = self._call("GET", self.base, READ_SCOPES, headers=ACCEPT_V4,
+                              params={"page": page, "limit": PAGE_SIZE}).json()
+            groups += body.get("groups") or []
+            if page >= int((body.get("meta") or {}).get("pageCount") or 1):
+                return groups
+            page += 1
+
+    def create(self, display_id: str, name: str, max_unexpected: int = GROUP_DEFAULT_MAX_TIME,
+               max_wrap_up: int = GROUP_DEFAULT_MAX_TIME) -> dict:
+        """Create a group, as VCC Admin does (display_id "" lets VCC choose one)."""
+        self._require_writes()
+        return self._call("POST", f"{self.base}/", WRITE_SCOPES, headers=ACCEPT_V4,
+                          json={"groupDisplayId": display_id, "groupName": name,
+                                "groupMaxUnexpectedTime": max_unexpected, "groupMaxWrapUpTime": max_wrap_up}).json()
+
+    def delete(self, group_id: str) -> None:
+        self._require_writes()
+        self._call("DELETE", f"{self.base}/{group_id}", WRITE_SCOPES, headers=ACCEPT_V4)

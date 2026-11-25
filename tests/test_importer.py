@@ -157,7 +157,7 @@ def test_compare_ignores_line_endings_and_spots_differences():
 
 def with_menu():
     doc = plan_doc()
-    doc["applets"].append({"name": "MNU M", "type": "ACD", "settings": {}, "next": {"NextApplet": "ANN A"}})
+    doc["applets"].append({"name": "MNU M", "type": "SetWhisper", "settings": {}, "next": {"NextApplet": "ANN A"}})
     doc["applets"][1]["next"] = {"NextApplet": "MNU M"}  # LOG B -> MNU M
     return doc
 
@@ -174,7 +174,7 @@ def test_drop_unsupported_unsets_connections_to_skipped_applets():
 def test_skip_unsupported_imports_the_rest(tmp_path, monkeypatch):
     write_plan(tmp_path, with_menu())
     portal = FakePortal()
-    with pytest.raises(PortalError, match="ACD is not supported"):
+    with pytest.raises(PortalError, match="SetWhisper is not supported"):
         import_plan(portal, tmp_path, TARGET, "zz Claude POC", log=lambda _: None)
     assert portal.writes == []
 
@@ -321,7 +321,7 @@ def test_skipping_an_unsupported_applet_removes_it_from_menu_choices():
     from vccflow.importer import drop_unsupported
 
     doc = doc_with_menu()
-    doc["applets"].append({"name": "ACD Q", "type": "ACD", "settings": {}, "next": {}})
+    doc["applets"].append({"name": "ACD Q", "type": "SetWhisper", "settings": {}, "next": {}})
     doc["applets"][-2]["next"]["Choices.2"] = "ACD Q"
     kept, notes = drop_unsupported(doc)
     menu = next(a for a in kept["applets"] if a["name"] == "MNU M")

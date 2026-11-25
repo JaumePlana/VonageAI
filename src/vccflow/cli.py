@@ -19,7 +19,7 @@ from vccflow import callback_numbers
 from vccflow.callback_numbers import CallbackNumbersClient, CallbackNumbersError
 from vccflow import schedules
 from vccflow.schedules import SchedulesClient, SchedulesError
-from vccflow.skills import SkillsClient, SkillsError
+from vccflow.skills import GroupsClient, GroupsError, SkillsClient, SkillsError
 from vccflow.portal import PortalClient, PortalError, check_portal_account, remove_session
 from vccflow.portal_token import PortalTokenProvider
 
@@ -279,7 +279,8 @@ def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, ar
     diffs = importer.import_plan(portal, source, plan_id, plan_name, dry_run=dry_run,
                                  skip_unsupported=args.skip_unsupported,
                                  require_data_sources=args.require_data_sources,
-                                 skills=SkillsClient(portal.account))
+                                 skills=SkillsClient(portal.account),
+                                 groups=GroupsClient(portal.account))
     if dry_run:
         print("Dry run: nothing was changed.")
     elif diffs:
@@ -575,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         if remove_session(e.account):
             print(f"The saved login for '{e.account.name}' was removed.", file=sys.stderr)
         return 1
-    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, SchedulesError, SkillsError, TimeoutError) as e:
+    except (ConfigError, AuthError, IpmError, ManagerError, MediaChannelsError, PortalError, CallbackNumbersError, SchedulesError, SkillsError, GroupsError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

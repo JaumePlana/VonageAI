@@ -331,6 +331,8 @@ class _WebForm(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.fields: dict[str, str] = {}
         self.options: dict[str, list[tuple[str, str]]] = {}
+        self.checked: set[str] = set()  # checked check boxes (ASP.NET MVC adds a hidden "false" of the same name)
+        self.files: dict[str, str] = {}  # file inputs: name -> the value the page shows (an existing file's path)
         self._select: str | None = None
         self._selected: str | None = None
         self._option: list | None = None  # [value, text parts]
@@ -344,10 +346,15 @@ class _WebForm(HTMLParser):
         a = dict(attrs)
         if tag == "input" and "disabled" not in a and a.get("name"):
             kind = (a.get("type") or "text").lower()
-            if kind in ("submit", "button", "image", "reset", "file"):
+            if kind == "file":
+                self.files[a["name"]] = a.get("value") or ""
+                return
+            if kind in ("submit", "button", "image", "reset"):
                 return
             if kind in ("checkbox", "radio") and "checked" not in a:
                 return
+            if kind == "checkbox":
+                self.checked.add(a["name"])
             self.fields[a["name"]] = a.get("value") if a.get("value") is not None else ("on" if kind == "checkbox" else "")
         elif tag == "select":
             self._select = a.get("name") if "disabled" not in a else None
@@ -430,6 +437,199 @@ def check_shim(settings: dict) -> None:
     if route == SHIM_TO_DATA_SOURCE and name and not SHIM_DATA_SOURCE_NOTATION.fullmatch(name):
         raise PortalError(f"Route to Interaction Plan data source {name!r} is not in the $(dataSourceName) notation "
                           "VCC requires")
+
+
+# --- ACD / Queue (appletType "ACD"; ACD?phoneNum=..&myApp=..: an MVC page posting a multipart form, ACD.har) ---
+
+ACD = "ACD"
+ACD_PREFIX = "Acd."
+# Audio slots: each posts a file part (an upload, or empty) and "<slot>Delete"; the page shows an existing
+# file's storage path ("recordings/<account>/<plan>/<GUID>.wav", played at ../<path>). Those with a data
+# source alternative also post "<slot>Dynamic" (a data source naming the audio file).
+ACD_AUDIO = ("Announcement1", "Announcement2", "Announcement3", "SubsequentAnnouncement", "CurPosAnnouncement",
+             "MusicFile", "OnHoldAnnouncement", "RingingAnnouncement", "WhisperAnnouncement")
+ACD_DYNAMIC_AUDIO = ("Announcement1", "Announcement2", "Announcement3", "SubsequentAnnouncement", "MusicFile",
+                     "WhisperAnnouncement")
+ACD_DATA_SOURCES = tuple(f"{a}Dynamic" for a in ACD_DYNAMIC_AUDIO) + ("ObjectPopDataSource",)
+# Dropdowns of this plan's applets, by name: exported as connections.
+ACD_CONNECTIONS = ("MaxEstimatedWaitApplication", "MaxQueueApplet", *(f"App{i}" for i in range(10)),
+                   "AgentHangupApplet", "NoAgentsLoggedInApplet", "AgentRejectApplet", "QueueTimeoutApplet")
+ACD_CHECKBOXES = ("PreferLastHandlingAgent", "PlayTargetAnswerTime", "PlayRecentAnswerTime",
+                  "PlayTargetAnswerTimeWhenRecentUnavailable", "ShouldPlayQueuePosition", "UnlimitedQueueLength",
+                  "BreakoutReenter", "SalesforceTransfer")
+# Presence states are posted by GUID, which differs per account: exported by name ("" = "Leave unchanged").
+ACD_PRESENCE = {"PostUnexpectedPresenceStateGuid": "PostUnexpectedPresenceState",
+                "PostWrapPresenceStateGuid": "PostWrapPresenceState"}
+ACD_GROUPS = 10  # Group0..Group9 (display IDs); TimedOverflow1..9 (seconds) once their group is chosen
+ACD_TEXT = ("CallRouterAlgorithm", "AgentTiebreakAlgorithm", "MaxEstimatedWaitPeriod", "AgePerMinute",
+            "MaxQueueLength", "BreakoutAvailable", "MusicDuration", "NoAnswerTimeoutAsSeconds",
+            "QueueTimeoutAsSeconds", "WhisperOption", "WrapupTimeAsSeconds")
+# 0 longest waiting, 1 skills based FIFO, 2 skills based LIFO (the page's acd_types). 3 (Salesforce
+# Omni-Channel, with SalesForceDialledNumber, FlowDevName, FallBackQueue, FlowInputParameters) is not recorded.
+ACD_ALGORITHMS = {"0", "1", "2"}
+ACD_WRAPUP_ALGORITHMS = {"1", "2"}  # HasWrapupTime: the wrap-up time is posted only for these
+ACD_SALESFORCE = ("SalesForceDialledNumber", "FlowDevName", "FallBackQueue")
+ACD_SAVED = "This applet has been saved."
+GROUP_LABEL = re.compile(r"^(.*) \(([^()]*)\)$")  # a group option: "France (13102022001)"
+
+
+def extract_acd(html: str) -> dict:
+    """An ACD page: {"form": _WebForm, "audio": {slot: existing file path}}; refuses another page."""
+    form = _web_form(html)
+    if f"{ACD_PREFIX}CallRouterAlgorithm" not in form.fields:
+        raise PortalError("Not an ACD page (no call router algorithm field); the page format may have changed")
+    audio = {slot: form.files.get(ACD_PREFIX + slot, "") for slot in ACD_AUDIO}
+    return {"form": form, "audio": {k: v for k, v in audio.items() if v}}
+
+
+def _option_text(form: _WebForm, field: str, value: str) -> str:
+    return next((t for v, t in form.options.get(field, []) if v == value), "")
+
+
+def acd_settings(page: dict) -> tuple[dict, dict]:
+    """Return (settings, next) for extract_acd(): connections, groups and presence states by name."""
+    form = page["form"]
+    f = {k[len(ACD_PREFIX):]: v for k, v in form.fields.items() if k.startswith(ACD_PREFIX)}
+    settings: dict[str, Any] = {k: f.get(k, "") for k in ACD_TEXT}
+    settings.update({k: ACD_PREFIX + k in form.checked for k in ACD_CHECKBOXES})
+    settings.update({k: f.get(k, "") for k in ACD_DATA_SOURCES})
+    for guid_field, name in ACD_PRESENCE.items():
+        settings[name] = _option_text(form, ACD_PREFIX + guid_field, f.get(guid_field, "")) if f.get(guid_field) else ""
+    groups = []
+    for i in range(ACD_GROUPS):
+        display_id = f.get(f"Group{i}", "")
+        if display_id:
+            label = _option_text(form, f"{ACD_PREFIX}Group{i}", display_id)
+            m = GROUP_LABEL.match(label)
+            groups.append({"Slot": i, "Name": m.group(1) if m else label, "DisplayId": display_id,
+                           "TimedOverflow": f.get(f"TimedOverflow{i}", "") if i else ""})
+    settings["Groups"] = groups
+    settings.update({k: f.get(k, "") for k in ACD_SALESFORCE})
+    settings["FlowInputParameters"] = sorted(k for k in f if k.startswith("FlowInputParameters"))
+    nxt = {k: f[k] for k in ACD_CONNECTIONS if f.get(k)}
+    return settings, nxt
+
+
+def check_acd(settings: dict) -> None:
+    """Refuse what was not recorded, before any request."""
+    if str(settings.get("CallRouterAlgorithm")) not in ACD_ALGORITHMS:
+        raise PortalError(f"ACD call router algorithm {settings.get('CallRouterAlgorithm')!r} has not been recorded "
+                          "yet (3 is Salesforce Omni-Channel); it cannot be saved")
+    if settings.get("SalesforceTransfer") or any(settings.get(k) for k in ACD_SALESFORCE) \
+            or settings.get("FlowInputParameters"):
+        raise PortalError("ACD Salesforce transfer / Omni-Channel flow settings have not been recorded yet; "
+                          "they cannot be saved")
+    slots = [g["Slot"] for g in settings.get("Groups") or []]
+    if len(set(slots)) != len(slots) or any(not 0 <= s < ACD_GROUPS for s in slots):
+        raise PortalError(f"ACD group slots {slots} are not valid")
+    ids = [g["DisplayId"] for g in settings.get("Groups") or []]
+    if len(set(ids)) != len(ids):
+        raise PortalError("An ACD cannot use the same group twice (the page refuses it)")
+
+
+def acd_form(settings: dict, nxt: dict, identity: dict, presence_ids: dict[str, str],
+             uploads: dict[str, tuple[str, bytes]] | None = None,
+             existing_audio: set[str] | frozenset = frozenset()) -> list[tuple[str, Any]]:
+    """The ACD form post, in the order the page posts it (ACD.har).
+
+    identity: the page's DialledNumber and ApplicationName. presence_ids: presence state name -> GUID in
+    the target. uploads: audio slot -> (file name, content); other slots post an empty file part, which keeps
+    a file already there (existing_audio). Each value is a string, or (file name, content, content type).
+    Fields the page disables are not posted: the maximum queue length when it is unlimited, a group's
+    overflow time when no group is chosen, the music duration and whisper option without audio, the
+    wrap-up time for "longest waiting".
+    """
+    check_acd(settings)
+    uploads = uploads or {}
+    s, out = settings, []
+
+    def text(name: str, value: Any) -> None:
+        out.append((ACD_PREFIX + name, "" if value is None else str(value)))
+
+    def checkbox(name: str) -> None:
+        if s.get(name):
+            text(name, "true")
+        text(name, "false")
+
+    def audio(slot: str) -> None:
+        if slot in ACD_DYNAMIC_AUDIO:
+            text(f"{slot}Dynamic", s.get(f"{slot}Dynamic"))
+        filename, content = uploads.get(slot, ("", b""))
+        out.append((ACD_PREFIX + slot, (filename, content, "audio/wav" if filename else "application/octet-stream")))
+        text(f"{slot}Delete", "0")
+
+    def has_audio(slot: str) -> bool:
+        return slot in uploads or slot in existing_audio
+
+    def presence(guid_field: str) -> None:
+        name = s.get(ACD_PRESENCE[guid_field]) or ""
+        if name and name not in presence_ids:
+            raise PortalError(f"ACD presence state '{name}' does not exist in the target account")
+        text(guid_field, presence_ids.get(name, "") if name else "")
+
+    text("DialledNumber", identity["DialledNumber"])
+    text("ApplicationName", identity["ApplicationName"])
+    text("CallRouterAlgorithm", s.get("CallRouterAlgorithm"))
+    text("AgentTiebreakAlgorithm", s.get("AgentTiebreakAlgorithm"))
+    for name in ("PreferLastHandlingAgent", "PlayTargetAnswerTime", "PlayRecentAnswerTime",
+                 "PlayTargetAnswerTimeWhenRecentUnavailable"):
+        checkbox(name)
+    text("MaxEstimatedWaitPeriod", s.get("MaxEstimatedWaitPeriod"))
+    text("MaxEstimatedWaitApplication", nxt.get("MaxEstimatedWaitApplication"))
+    checkbox("ShouldPlayQueuePosition")
+    text("AgePerMinute", s.get("AgePerMinute"))
+    checkbox("UnlimitedQueueLength")
+    if not s.get("UnlimitedQueueLength"):
+        text("MaxQueueLength", s.get("MaxQueueLength"))
+    text("MaxQueueApplet", nxt.get("MaxQueueApplet"))
+    text("BreakoutAvailable", s.get("BreakoutAvailable"))
+    checkbox("BreakoutReenter")
+    for i in range(10):
+        text(f"App{i}", nxt.get(f"App{i}"))
+    for slot in ("Announcement1", "Announcement2", "Announcement3", "SubsequentAnnouncement", "CurPosAnnouncement",
+                 "MusicFile"):
+        audio(slot)
+    if has_audio("MusicFile"):
+        text("MusicDuration", s.get("MusicDuration"))
+    text("NoAnswerTimeoutAsSeconds", s.get("NoAnswerTimeoutAsSeconds"))
+    presence("PostUnexpectedPresenceStateGuid")
+    for name in ("AgentHangupApplet", "NoAgentsLoggedInApplet", "AgentRejectApplet"):
+        text(name, nxt.get(name))
+    text("QueueTimeoutAsSeconds", s.get("QueueTimeoutAsSeconds"))
+    text("QueueTimeoutApplet", nxt.get("QueueTimeoutApplet"))
+    for slot in ("OnHoldAnnouncement", "RingingAnnouncement", "WhisperAnnouncement"):
+        audio(slot)
+    if s.get("WhisperAnnouncementDynamic") or has_audio("WhisperAnnouncement"):
+        text("WhisperOption", s.get("WhisperOption"))
+    text("ObjectPopDataSource", s.get("ObjectPopDataSource"))
+    groups = {g["Slot"]: g for g in s.get("Groups") or []}
+    for i in range(ACD_GROUPS):
+        g = groups.get(i)
+        text(f"Group{i}", g["DisplayId"] if g else "")
+        if g and i:
+            text(f"TimedOverflow{i}", g.get("TimedOverflow"))
+    if str(s.get("CallRouterAlgorithm")) in ACD_WRAPUP_ALGORITHMS:
+        text("WrapupTimeAsSeconds", s.get("WrapupTimeAsSeconds"))
+    presence("PostWrapPresenceStateGuid")
+    checkbox("SalesforceTransfer")
+    for name in ACD_SALESFORCE:
+        text(name, s.get(name))
+    return out
+
+
+def acd_presence_states(form: _WebForm) -> dict[str, str]:
+    """Presence state name -> GUID, as an ACD page offers them ("Leave unchanged" left out)."""
+    return {t: v for v, t in form.options.get(f"{ACD_PREFIX}PostWrapPresenceStateGuid", []) if v}
+
+
+def acd_groups(form: _WebForm) -> list[dict]:
+    """The account's groups as an ACD page offers them: [{"groupDisplayId", "groupName"}]."""
+    groups = []
+    for v, t in form.options.get(f"{ACD_PREFIX}Group0", []):
+        if v:
+            m = GROUP_LABEL.match(t)
+            groups.append({"groupDisplayId": v, "groupName": m.group(1) if m else t})
+    return groups
 
 
 def extract_initial_applet(html: str, plan_id: str) -> str | None:
@@ -668,6 +868,27 @@ class PortalClient:
     def get_shim(self, applet: dict) -> dict:
         """Return extract_shim() for a Route to Interaction Plan from list_applets()."""
         return extract_shim(self._request("GET", applet["configUrl"]).text)
+
+    def get_acd(self, applet: dict) -> dict:
+        """Return extract_acd() for an ACD from list_applets()."""
+        return extract_acd(self._request("GET", applet["configUrl"]).text)
+
+    def download_recording(self, path: str) -> bytes:
+        """Download an ACD audio file by the path its page shows ("recordings/..."), as "Play Existing" does."""
+        resp = self.session.get(f"{self.account.portal_url}/{path}", allow_redirects=False, timeout=120)
+        if resp.status_code != 200 or not resp.content:
+            raise PortalError(f"Downloading {path} failed: HTTP {resp.status_code}")
+        return resp.content
+
+    def acd_lookups(self, plan_id: str | None = None) -> dict | None:
+        """{"groups": acd_groups(), "presence": acd_presence_states()} from the first ACD page found
+        (plan_id first). None if the account has no ACD."""
+        def read(_pid: str, applet: dict) -> Any:
+            if not (applet.get("configUrl") or "").startswith("ACD"):
+                return None
+            form = self.get_acd(applet)["form"]
+            return {"groups": acd_groups(form), "presence": acd_presence_states(form)}
+        return self._first_from_applets(plan_id, read)
 
     def get_applet_form(self, applet: dict) -> dict:
         """Editor page fields of an applet from list_applets(), for types without a parsed format."""
@@ -948,6 +1169,45 @@ class PortalClient:
         if wrong:
             raise PortalError(f"Route to Interaction Plan '{name}' reads back with {', '.join(wrong)}")
         return saved
+
+    def save_acd(self, plan_id: str, name: str, settings: dict, nxt: dict,
+                 audio: dict[str, Path] | None = None) -> dict:
+        """Save an ACD as its page does: one multipart post with every field and the audio files (ACD.har).
+
+        Groups are posted by display ID and must be offered by the page; presence states are posted by the
+        GUID the target's page gives their name. VCC answers with the page and "This applet has been saved."
+        Returns extract_acd() of that page.
+        """
+        self._require_writes()
+        check_acd(settings)
+        page_url = f"ACD?phoneNum={quote(plan_id)}&myApp={quote(name)}"
+        page = extract_acd(self._request("GET", f"{page_url}&application=ACD").text)
+        form = page["form"]
+        token = form.fields.get("__RequestVerificationToken")
+        if not token:
+            raise PortalError(f"ACD page for '{name}' has no form token")
+        offered = {v for v, _ in form.options.get(f"{ACD_PREFIX}Group0", []) if v}
+        missing = [f"{g['Name']} ({g['DisplayId']})" for g in settings.get("Groups") or [] if g["DisplayId"] not in offered]
+        if missing:
+            raise PortalError(f"ACD '{name}': groups not offered by the page: {', '.join(missing)}")
+        uploads = {}
+        for slot, path in (audio or {}).items():
+            if slot not in ACD_AUDIO:
+                raise PortalError(f"ACD '{name}': {slot} is not an audio slot")
+            if path.stat().st_size > MAX_MEDIA_BYTES:
+                raise PortalError(f"{path} is larger than 10 MB, which the portal refuses")
+            uploads[slot] = (path.name, path.read_bytes())
+        identity = {k: form.fields[f"{ACD_PREFIX}{k}"] for k in ("DialledNumber", "ApplicationName")}
+        parts = acd_form(settings, nxt, identity, acd_presence_states(form), uploads, set(page["audio"]))
+        files = [("__RequestVerificationToken", (None, token))]
+        files += [(k, (None, v) if isinstance(v, str) else v) for k, v in parts]
+        resp = self._request("POST", page_url, headers={"Referer": f"{self.base}/{page_url}"}, files=files)
+        errors = [re.sub(r"<[^>]+>|\s+", " ", e).strip() for e in VALIDATION_ERRORS.findall(resp.text)]
+        if any(errors):
+            raise PortalError(f"Saving ACD '{name}' was refused: {'; '.join(e for e in errors if e)}")
+        if ACD_SAVED not in resp.text:
+            raise PortalError(f"Saving ACD '{name}' was not confirmed (no \"{ACD_SAVED}\")")
+        return extract_acd(resp.text)
 
     def set_initial_applet(self, plan_id: str, name: str) -> None:
         """Set the applet the plan starts with.

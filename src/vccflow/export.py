@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from vccflow.portal import SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS, PortalClient, PortalError
+from vccflow.portal import (ACD, ACD_DATA_SOURCES, SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS, PortalClient, PortalError,
+                            acd_settings)
 
 FORMAT = "vccflow.plan/1"
 DATA_ROUTER = "DataRouter"
@@ -302,6 +303,8 @@ def data_sources_used(applet: dict) -> set[str]:
     for p in (s.get("CrmCreationViewModel") or {}).get("CrmObjectParameters") or []:
         if p.get("DataSourceType") == 0 and p.get("Value"):
             found.add(p["Value"])
+    if applet.get("type") == ACD:  # audio named by a data source, and the object pop data source
+        found.update(s[k] for k in ACD_DATA_SOURCES if s.get(k))
     if applet.get("type") == SKILL_TAGGER:  # dynamic skills and the personal queue read data sources
         found.update(d["Name"] for d in s.get("DynamicSkills") or [] if d.get("Name"))
         found.update(s[k] for k in SKILL_TAGGER_DATA_SOURCES if s.get(k))
@@ -375,6 +378,22 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
     if config_url.startswith("SkillPersonalQueueTagger"):
         entry["type"] = SKILL_TAGGER
         entry["settings"], entry["next"] = split_skill_tagger(portal.get_skill_tagger(applet))
+        return entry
+
+    if config_url.startswith("ACD"):
+        page = portal.get_acd(applet)
+        entry["type"] = ACD
+        entry["settings"], entry["next"] = acd_settings(page)
+        media = []
+        for slot, path in page["audio"].items():
+            content = portal.download_recording(path)
+            filename = f"{_safe_filename(applet['name'] + ' ' + slot)}{Path(path).suffix or '.wav'}"
+            (media_dir / filename).write_bytes(content)
+            # VCC stores the file under a GUID: the uploaded file's name is not kept, so it is compared by content.
+            media.append({"property": slot, "file": f"media/{filename}", "name": None,
+                          "sha256": hashlib.sha256(content).hexdigest()})
+        if media:
+            entry["media"] = media
         return entry
 
     if config_url.lower().startswith("shim.aspx"):

@@ -19,8 +19,9 @@ from typing import Callable
 
 from vccflow import export
 from vccflow.scoped_api import ApiError
-from vccflow.skills import SkillsClient
-from vccflow.portal import (MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError, check_shim,
+from vccflow.skills import GroupsClient, SkillsClient
+from vccflow.portal import (ACD, ACD_PRESENCE, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
+                            acd_groups, acd_presence_states, check_acd, check_shim,
                             data_connector_form, data_router_form, data_router_missing_targets, shim_configured,
                             skill_tagger_form)
 
@@ -53,7 +54,7 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -63,6 +64,11 @@ def unsupported_reason(applet: dict) -> str | None:
     if applet["type"] == SKILL_TAGGER:
         try:
             skill_tagger_form(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+    if applet["type"] == ACD:
+        try:
+            check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
     if applet["type"] == SHIM:
@@ -240,6 +246,106 @@ def unsaved_routes(applets: list[dict], plans: list[dict], applets_of: Callable[
     return unsaved
 
 
+def match_groups(applets: list[dict], target: list[dict]) -> tuple[list[str], list[dict]]:
+    """Point the ACDs' groups at the target account's groups. Return (warnings, groups to create).
+
+    target: [{"groupDisplayId", "groupName"}]. A group is the same when display ID and name both match.
+    Otherwise, as the user asked (2026-11-25): a group with the same name is used, whatever its ID; then
+    one with the same ID, whatever its name; else it is to be created with the source's ID and name. Each
+    case is a warning. The applets' settings are changed to the target's group, so the read-back matches.
+    """
+    by_id = {g["groupDisplayId"]: g for g in target}
+    by_name: dict[str, dict] = {}
+    for g in target:
+        by_name.setdefault(g["groupName"], g)
+    warnings: dict[tuple, list[str]] = {}
+    create: dict[str, dict] = {}
+    for a in applets:
+        if a.get("type") != ACD:
+            continue
+        for g in a["settings"].get("Groups") or []:
+            src_id, src_name = g["DisplayId"], g["Name"]
+            same = by_id.get(src_id)
+            if same and same["groupName"] == src_name:
+                continue
+            named = by_name.get(src_name)
+            if named:
+                g["DisplayId"] = named["groupDisplayId"]
+                key = ("name", src_id, src_name, named["groupDisplayId"])
+            elif same:
+                g["Name"] = same["groupName"]
+                key = ("id", src_id, src_name, same["groupName"])
+            else:
+                create.setdefault(src_id, {"groupDisplayId": src_id, "groupName": src_name})
+                key = ("new", src_id, src_name, None)
+            warnings.setdefault(key, []).append(a["name"])
+    out = []
+    for (kind, src_id, src_name, other), users in warnings.items():
+        used = f" (used by {', '.join(sorted(set(users)))})"
+        if kind == "name":
+            out.append(f"group '{src_name}' has ID {src_id} in the source but {other} in the target account: "
+                       f"matched by name{used}")
+        elif kind == "id":
+            out.append(f"group {src_id} is named '{src_name}' in the source but '{other}' in the target account: "
+                       f"matched by ID{used}")
+        else:
+            out.append(f"group '{src_name}' ({src_id}) does not exist in the target account by ID or name{used}")
+    return out, list(create.values())
+
+
+def match_presence_states(applets: list[dict], target: set[str] | dict) -> list[str]:
+    """Point the ACDs' presence states at the target's by name (letter case aside). One the target lacks
+    is left as "Leave unchanged", with a warning. Return the warnings."""
+    lower = {n.lower(): n for n in target}
+    warnings = []
+    for a in applets:
+        if a.get("type") != ACD:
+            continue
+        s = a["settings"]
+        for field in ACD_PRESENCE.values():
+            name = s.get(field)
+            if not name or name in target:
+                continue
+            if name.lower() in lower:
+                s[field] = lower[name.lower()]
+                continue
+            label = "after an unexpected" if "Unexpected" in field else "after wrap-up"
+            warnings.append(f"ACD '{a['name']}': presence state '{name}' ({label} presence) does not exist in the "
+                            "target account: left as 'Leave unchanged'")
+            s[field] = ""
+    return warnings
+
+
+def _resolve_acd_lookups(applets: list[dict], target_groups: list[dict], presence: dict, log: Callable[[str], None],
+                        dry_run: bool, can_create: bool) -> list[dict]:
+    """Match the ACDs' groups and presence states (warnings logged); return the groups to create.
+    Without the User Admin API (can_create False), a group to create stops the import."""
+    warnings, create = match_groups(applets, target_groups)
+    for w in warnings:
+        log(f"WARNING: {w}")
+    for w in match_presence_states(applets, presence):
+        log(f"WARNING: {w}")
+    if create and not can_create:
+        raise PortalError("Cannot import: groups missing in the target account cannot be created without the "
+                          "User Admin API (users:write): " + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})"
+                                                                        for g in create))
+    if create:
+        log(f"NOTE: {len(create)} groups {'would be' if dry_run else 'are'} created in the target account with "
+            "their source ID and name (maximum unexpected and wrap-up times: VCC Admin's default, 500 seconds; "
+            "agents and presence states are not copied): "
+            + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})" for g in create))
+    return create
+
+
+def _create_groups(groups: GroupsClient, create: list[dict], log: Callable[[str], None]) -> list[dict]:
+    log("0. Creating the missing groups")
+    made = []
+    for g in create:
+        made.append(groups.create(g["groupDisplayId"], g["groupName"]))
+        log(f"   NEW GROUP created in the target account: '{g['groupName']}' ({g['groupDisplayId']})")
+    return made
+
+
 def _set_path(props: dict, path: str, media_id: int) -> None:
     node = props
     for part in path.split("."):
@@ -295,11 +401,14 @@ def import_plan(
     require_data_sources: bool = False,
     log: Callable[[str], None] = print,
     skills: SkillsClient | None = None,
+    groups: GroupsClient | None = None,
 ) -> list[str]:
     """Copy the exported plan in plan_dir into the target plan. Return the read-back differences.
 
     skills (the target account's User Admin API) lists its skills and creates those the plan's
     Skill Taggers need; created skills are reported, and deleted again if the import fails.
+    groups (the same API) does the same for the groups of the plan's ACDs (see match_groups); their
+    presence states are matched by name (see match_presence_states).
 
     With skip_unsupported, applets that cannot be imported yet are left out (see drop_unsupported).
     Data sources the plan reads but does not set should exist in the target account. Missing
@@ -372,6 +481,30 @@ def import_plan(
         if skills_to_create:
             log(f"NOTE: {len(skills_to_create)} skills the target account lacks {'would be' if dry_run else 'are'} "
                 f"created in it: {', '.join(skills_to_create)}")
+    # ACD groups and presence states: by name in the target account. The groups come from the User Admin
+    # API (users:read), else from an ACD page; presence states from an ACD page. Without an ACD in the target
+    # account, both are read from the first ACD this import creates, before saving any.
+    acds = [a for a in applets if a["type"] == ACD]
+    acd_unchecked, groups_to_create = False, []
+    if acds:
+        target_groups = None
+        if groups is not None:
+            try:
+                target_groups = groups.list()
+            except ApiError as e:
+                log(f"WARNING: cannot list the target account's groups through the User Admin API ({e}); "
+                    "missing groups cannot be created")
+                groups = None
+        lookups = portal.acd_lookups(target_plan_id)
+        if target_groups is None and lookups is not None:
+            target_groups = lookups["groups"]
+        if lookups is None:
+            acd_unchecked = True
+            log("NOTE: the target account has no ACD to read its presence states (and groups) from; they are "
+                "checked after creating the applets, before saving any")
+        else:
+            groups_to_create = _resolve_acd_lookups(applets, target_groups, lookups["presence"], log, dry_run,
+                                                    groups is not None)
     log(f"Checks passed: {len(applets)} applets from '{doc['plan']['name']}' into '{target_plan_name}'")
     missing_targets = {a["name"]: m for a in applets if a["type"] == DATA_ROUTER
                        and (m := data_router_missing_targets(a["settings"], a.get("next", {})))}
@@ -412,12 +545,15 @@ def import_plan(
 
     created: list[str] = []
     created_skills: list[dict] = []
+    created_groups: list[dict] = []
     try:
         if skills_to_create:
             log("0. Creating the missing skills")
             for name in skills_to_create:
                 created_skills.append(skills.create(name))
                 log(f"   NEW SKILL created in the target account: '{name}'")
+        if groups_to_create:
+            created_groups += _create_groups(groups, groups_to_create, log)
         if to_create:
             log(f"0. Making the data sources exist through '{AUX_SDS}'")
             if not aux_in_target:
@@ -432,6 +568,12 @@ def import_plan(
         by_name = {a["name"]: a for a in portal.list_applets(target_plan_id)["applets"]}
         if skills_unchecked:
             _resolve_skills(applets, portal.get_skill_tagger(by_name[taggers[0]]).get("AllSkills") or [], log, False)
+        if acd_unchecked:
+            form = portal.get_acd(by_name[acds[0]["name"]])["form"]
+            target_groups = target_groups if target_groups is not None else acd_groups(form)
+            late = _resolve_acd_lookups(applets, target_groups, acd_presence_states(form), log, False, groups is not None)
+            if late:
+                created_groups += _create_groups(groups, late, log)
 
         log("2. Saving settings and connections")
         for a in applets:
@@ -440,6 +582,11 @@ def import_plan(
                 portal.save_data_connector(target_plan_id, a["name"], a["settings"], nxt)
             elif a["type"] == SKILL_TAGGER:
                 portal.save_skill_tagger(target_plan_id, a["name"], a["settings"], nxt)
+            elif a["type"] == ACD:
+                portal.save_acd(target_plan_id, a["name"], a["settings"], nxt,
+                                {m["property"]: plan_dir / m["file"] for m in a.get("media", [])})
+                if a.get("media"):
+                    log(f"   uploaded {len(a['media'])} audio files: {', '.join(m['property'] for m in a['media'])}")
             elif a["type"] == SHIM and a["name"] in unsaved:
                 log(f"   {a['name']}: Route to Interaction Plan created without its settings (see the warning above)")
                 continue
@@ -489,6 +636,12 @@ def import_plan(
                 portal.delete_applet(target_plan_id, name)
             except PortalError as e:
                 log(f"   could not delete '{name}': {e}")
+        for g in created_groups:
+            try:
+                groups.delete(g["groupId"])
+                log(f"   deleted the group it created: '{g['groupName']}' ({g['groupDisplayId']})")
+            except ApiError as e:
+                log(f"   could not delete the group it created, '{g.get('groupName')}': {e}")
         for s in created_skills:
             try:
                 skills.delete(s["skillId"])
