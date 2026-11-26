@@ -14,7 +14,7 @@ Read `PROGRESS.md` ("Resume here") first, then `src/vccflow/export.py`, `src/vcc
 
 - **Secrets:** read only the sanitized output. Run `vccflow har` first, and use `scripts/inspect_har.py`, which masks credentials. Never print `.env`, `.sessions/`, a raw `.har`, or Data Connector definitions.
 - **Writes:** live writes only to a plan the user names as a scratch plan, in an account with `allow_portal_writes = true`. Never PROD. Don't empty a plan or delete applets you didn't create without asking.
-- **Git:** commit or push only when the user asks. `exports/` and the user's notes file stay out.
+- **Git:** commit or push only when the user asks. `exports/` stays out.
 - **No guessing:** if the recording doesn't show a case, refuse it in code with a clear error (see `data_connector_form`), and tell the user what to record.
 
 ## 1. Read the recording

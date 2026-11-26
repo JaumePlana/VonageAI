@@ -58,7 +58,11 @@ PLACEHOLDER = re.compile(r"\$\(([^)]+)\)")
 # Data Connector's URL marks its definition as JavaScript code, not a REST request (user, 2026-11-13).
 RESERVED = {"javascriptengineurl"}
 # Editor-page applet types import-plan writes back: their settings stay exactly as VCC sends them.
-IMPORTABLE_EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu"}
+IMPORTABLE_EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu", "Priority"}
+# Queue - Set Priority (setPriority.har): the editor's choices, value -> the page's wording. VCC answers
+# with a number (0.5) and the editor posts a string ("0.9"); both are saved.
+PRIORITY = "Priority"
+PRIORITY_LABELS = {"0.9": "Highest", "0.75": "Higher", "0.5": "Normal", "0.25": "Lower", "0.1": "Lowest"}
 GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)

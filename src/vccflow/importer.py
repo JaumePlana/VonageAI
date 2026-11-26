@@ -70,6 +70,13 @@ def unsupported_reason(applet: dict) -> str | None:
             skill_tagger_form(applet["settings"], applet.get("next", {}))
         except PortalError as e:
             return str(e)
+    if applet["type"] == export.PRIORITY:
+        extra = sorted(set(applet["settings"]) - {"Priority"})
+        if extra:
+            return f"Queue - Set Priority settings {', '.join(extra)} have not been recorded yet; they cannot be saved"
+        if str(applet["settings"].get("Priority")) not in export.PRIORITY_LABELS:
+            return (f"Queue - Set Priority value {applet['settings'].get('Priority')!r} is not one of the editor's "
+                    f"choices ({', '.join(export.PRIORITY_LABELS)})")
     if applet["type"] == SCHEDULE_ROUTER and applet["settings"].get("ScheduleNextAppletMappings"):
         return "Schedule Router ScheduleNextAppletMappings has not been recorded yet; it cannot be saved"
     if applet["type"] == ACD:

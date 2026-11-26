@@ -237,6 +237,10 @@ def compare_docs(source: dict, target: dict) -> dict:
                 # Fixed choices as the page words them ("Random", "First Retry"); an unknown code stays as it is.
                 sa = {k: ACD_LABELS.get(k, {}).get(str(v), v) for k, v in sa.items() if k != "Groups"}
                 sb = {k: ACD_LABELS.get(k, {}).get(str(v), v) for k, v in sb.items() if k != "Groups"}
+            if a.get("type") == b.get("type") == export.PRIORITY:
+                # As the page words them ("Highest"): VCC sends 0.9 and the editor posts "0.9".
+                sa = {k: export.PRIORITY_LABELS.get(str(v), v) if k == "Priority" else v for k, v in sa.items()}
+                sb = {k: export.PRIORITY_LABELS.get(str(v), v) if k == "Priority" else v for k, v in sb.items()}
             if a.get("type") == b.get("type") == export.SKILL_TAGGER:
                 _skill_findings(name, kind, sa, sb, report)
                 sa = {k: v for k, v in sa.items() if k not in SKILL_LISTS}
