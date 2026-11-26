@@ -77,6 +77,27 @@ CCR_CHOICES = {"DistributionType": ("Sequential", "Rotary"), "WhisperOption": ("
 CCR_APPLETS = ("CallCompleteApplet", "UnsuccessfulCallApplet")
 # A delivery number: a data source, $(name), or an E.164 number, +<country code><digits> (user, 2026-11-26).
 CCR_NUMBER = re.compile(r"\$\([^()]+\)|\+[0-9]+")
+# Call Recording (callRecording.har): a React editor, appletType "CallRecording": the action and when it
+# takes effect, both required. The editor offers some "when" choices per action only, yet saved Pause with
+# Immediate (#9): every combination is valid (user, 2026-11-26).
+CALL_RECORDING = "CallRecording"
+CR_CHOICES = {"Function": ("Start", "Pause", "Resume"), "DelayTransfer": ("Immediate", "Transferred", "Manual")}
+# Loop Counter (loopCounter.har): a React editor, appletType "LoopCounter": "Maximum runs (1-10)" (VCC refuses
+# 0 and 11, and answers an empty value with HTTP 500), the next applet and the one after the maximum runs
+# (NextAppletIdOnMaximumReached + NextAppletGuidOnMaximumReached), exported as "NextAppletOnMaximumReached".
+LOOP_COUNTER = "LoopCounter"
+LC_MAXIMUM = "NextAppletOnMaximumReached"
+# Callback (callback.har): a React editor, appletType "Callback". The callback's initial applet is posted as
+# CallbackInitialAppletId (any plan's applet; none: "Return to previous queue"), and VCC fills in its GUID and
+# plan. In the applet's own plan it is a connection, "CallbackInitialApplet"; in another plan, the settings
+# "CallbackInitialPlan" and "CallbackInitialApplet" by name. The numbers to dial and present are free text
+# (100 characters; data sources as $(name)). The routing applets: NextApplet (name + GUID) and two GUIDs.
+CALLBACK = "Callback"
+CB_INITIAL_FIELDS = ("CallbackInitialAppletId", "CallbackInitialAppletGuid", "CallbackInitialInteractionPlanId")
+CB_INITIAL = "CallbackInitialApplet"
+CB_OTHER_PLAN = ("CallbackInitialPlan", "CallbackInitialApplet")
+CB_NUMBERS = ("CallbackNumberProperty", "PresentedNumberProperty")
+CB_GUID_APPLETS = ("DuplicateCallbackApplet", "FailureApplet")
 GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
@@ -360,6 +381,77 @@ def call_connect_router_problems(settings: dict) -> list[str]:
     return problems
 
 
+def call_recording_problems(settings: dict, nxt: dict) -> list[str]:
+    """Why a Call Recording cannot be saved as it is: both choices are required."""
+    problems = [f"Call Recording settings {', '.join(sorted(set(settings) - set(CR_CHOICES)))} have not been "
+                "recorded yet"] if set(settings) - set(CR_CHOICES) else []
+    for key, choices in CR_CHOICES.items():
+        if settings.get(key) not in choices:
+            problems.append(f"Call Recording {key} {settings.get(key)!r} is not one of {', '.join(choices)}")
+    if set(nxt) - {"NextApplet"}:
+        problems.append(f"Call Recording connections {', '.join(sorted(set(nxt) - {'NextApplet'}))} have not been "
+                        "recorded yet")
+    return problems
+
+
+def loop_counter_problems(settings: dict, nxt: dict) -> list[str]:
+    """Why a Loop Counter cannot be saved as it is: the maximum runs must be 1 to 10."""
+    problems = [f"Loop Counter settings {', '.join(sorted(set(settings) - {'MaximumLoopCount'}))} have not been "
+                "recorded yet"] if set(settings) - {"MaximumLoopCount"} else []
+    v = settings.get("MaximumLoopCount")
+    if not (isinstance(v, int) or (isinstance(v, str) and v.isdigit())) or not 1 <= int(v) <= 10:
+        problems.append(f"Loop Counter maximum runs {v!r} is not 1 to 10")
+    if set(nxt) - {"NextApplet", LC_MAXIMUM}:
+        problems.append(f"Loop Counter connections {', '.join(sorted(set(nxt) - {'NextApplet', LC_MAXIMUM}))} have "
+                        "not been recorded yet")
+    return problems
+
+
+def callback_initial(portal: Any, plan_id: str, initial: dict, listed: list[dict], name: str) -> tuple[dict, dict, list[str]]:
+    """(settings, next, problems) for a Callback's initial applet (CB_INITIAL_FIELDS as VCC sends them)."""
+    applet_id, guid = initial.get("CallbackInitialAppletId"), initial.get("CallbackInitialAppletGuid")
+    plan = initial.get("CallbackInitialInteractionPlanId")
+    if not applet_id and not guid:
+        return {}, {}, []  # "Return to previous queue"
+
+    def find(applets: list[dict]) -> str | None:
+        return next((a["name"] for a in applets if (applet_id and a.get("id") == applet_id)
+                     or (guid and str(a.get("guid")).lower() == str(guid).lower())), None)
+
+    if not plan or str(plan).lower() == plan_id.lower():
+        found = find(listed)
+        if found:
+            return {}, {CB_INITIAL: found}, []
+        return {}, {}, [f"'{name}' callback initial applet {applet_id or guid} is not in this plan"]
+    plan_name = next((p["interactionPlanName"] for p in portal.list_plans()
+                      if str(p["interactionPlanId"]).lower() == str(plan).lower()), None)
+    found = find(portal.list_applets(plan).get("applets", [])) if plan_name else None
+    if not found:
+        return {}, {}, [f"'{name}' callback initial applet {applet_id or guid} is not in Interaction Plan "
+                        f"{plan_name or plan}"]
+    return {"CallbackInitialPlan": plan_name, "CallbackInitialApplet": found}, {}, []
+
+
+def callback_problems(applet: dict) -> list[str]:
+    """Why a Callback cannot be saved as it is: what the recording does not show."""
+    s, nxt = applet.get("settings", {}), applet.get("next", {})
+    problems = []
+    unknown = sorted(set(s) - set(CB_NUMBERS) - set(CB_OTHER_PLAN))
+    if unknown:
+        problems.append(f"Callback settings {', '.join(unknown)} have not been recorded yet")
+    for key in CB_NUMBERS:
+        if s.get(key) is not None and (not isinstance(s[key], str) or len(s[key]) > 100):
+            problems.append(f"Callback {key} {s[key]!r} is not text of up to 100 characters")
+    if bool(s.get("CallbackInitialPlan")) != bool(s.get("CallbackInitialApplet")):
+        problems.append("Callback initial applet in another Interaction Plan needs both the plan and the applet")
+    extra = sorted(set(nxt) - {"NextApplet", CB_INITIAL, *CB_GUID_APPLETS})
+    if extra:
+        problems.append(f"Callback connections {', '.join(extra)} have not been recorded yet")
+    if nxt.get(CB_INITIAL) == applet.get("name"):
+        problems.append("Callback initial applet is the applet itself, which the editor does not allow")
+    return problems
+
+
 def data_sources_used(applet: dict) -> set[str]:
     """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
     a Data Router rule's data source, a Salesforce match data source, the values a
@@ -528,6 +620,10 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         own = next((x for x in schedules_in_metadata(state.get("metadata")) if x["id"] == props.get("Schedule")), None)
         entry["scheduleStatuses"] = own["targets"] if own else []
     listed = listed or []
+    cb_initial = None
+    if entry["type"] == CALLBACK:  # may point to another plan: resolved by name below
+        props = dict(props)
+        cb_initial = {k: props.pop(k, None) for k in CB_INITIAL_FIELDS}
     problems = broken_connection_ids(applet["name"], props, listed) if listed else []
     # Types import-plan writes keep their settings as VCC sends them. The others are only exported
     # and compared, so their account-specific references are kept by name: applets, and GUIDs the
@@ -547,6 +643,11 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         if nxt.get("NextApplet") == nxt.get("UnsuccessfulCallApplet"):
             nxt.pop("NextApplet", None)  # VCC's copy of UnsuccessfulCallApplet; another value is kept
         settings = {k: v for k, v in settings.items() if k not in CCR_NOT_COPIED}
+    if cb_initial is not None:
+        cb_settings, cb_next, cb_problems = callback_initial(portal, plan_id, cb_initial, listed, applet["name"])
+        settings.update(cb_settings)
+        nxt.update(cb_next)
+        problems += cb_problems
     if by_name:
         labels = option_labels(state.get("metadata"))
         settings, nxt = relabel(settings, labels), relabel(nxt, labels)

@@ -69,7 +69,8 @@ def unsupported_reason(applet: dict) -> str | None:
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
     if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER,
-                                               DIAL_IN_CONFIG, COLLECT_INPUT, export.CALL_CONNECT_ROUTER}:
+                                               DIAL_IN_CONFIG, COLLECT_INPUT, export.CALL_CONNECT_ROUTER,
+                                               export.CALL_RECORDING, export.LOOP_COUNTER, export.CALLBACK}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -95,6 +96,13 @@ def unsupported_reason(applet: dict) -> str | None:
             check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
+    if applet["type"] == export.CALLBACK and (problems := export.callback_problems(applet)):
+        return "; ".join(problems)
+    if applet["type"] in (export.CALL_RECORDING, export.LOOP_COUNTER):
+        check = export.call_recording_problems if applet["type"] == export.CALL_RECORDING else export.loop_counter_problems
+        problems = check(applet["settings"], applet.get("next", {}))
+        if problems:
+            return "; ".join(problems)
     if applet["type"] == export.CALL_CONNECT_ROUTER:
         problems = export.call_connect_router_problems(applet["settings"])
         extra = sorted(set(applet.get("next", {})) - set(export.CCR_APPLETS))
@@ -258,6 +266,36 @@ def _resolve_skills(applets: list[dict], existing: list[str], log: Callable[[str
         log(f"WARNING: {m}")
     use_skill_spellings(applets, spellings)
     return list(missing)
+
+
+def callback_initial_targets(applets: list[dict], portal: PortalClient, log: Callable[[str], None],
+                             verb: str) -> dict[str, int | None]:
+    """Callback name -> the target account's ID of its initial applet in another plan, looked up by plan and
+    applet name (None, with a warning, when not found: it is saved as "Return to previous queue")."""
+    if not applets:
+        return {}
+    plans: dict[str, list[dict]] = {}
+    for p in portal.list_plans():
+        plans.setdefault(p["interactionPlanName"], []).append(p)
+    found: dict[str, int | None] = {}
+    for a in applets:
+        plan, applet = a["settings"]["CallbackInitialPlan"], a["settings"]["CallbackInitialApplet"]
+        matches = plans.get(plan, [])
+        why = None
+        if not matches:
+            why = f"Interaction Plan '{plan}' does not exist in the target account"
+        elif len(matches) > 1:
+            why = f"the target account has {count(len(matches), 'Interaction Plan')} named '{plan}'"
+        else:
+            listed = portal.list_applets(matches[0]["interactionPlanId"]).get("applets", [])
+            found[a["name"]] = next((x.get("id") for x in listed if x["name"] == applet), None)
+            if found[a["name"]] is None:
+                why = f"applet '{applet}' does not exist in Interaction Plan '{plan}' of the target account"
+        if why:
+            found[a["name"]] = None
+            log(f"WARNING: Callback '{a['name']}' {verb} copied with 'Return to previous queue' as its initial "
+                f"applet: {why}. Set it in the portal.")
+    return found
 
 
 def unsaved_routes(applets: list[dict], plans: list[dict], applets_of: Callable[[str], list[str]],
@@ -695,9 +733,15 @@ def import_plan(
         log(f"WARNING: Data Router '{name}' {verb} copied with no destination applet for: {', '.join(m)}. "
             "Set them in the portal.")
     for a in applets:
+        if a.get("connectionProblems"):  # found by the export: references that point nowhere are not copied
+            log(f"WARNING: '{a['name']}' has broken references in the source, not copied: "
+                + "; ".join(a["connectionProblems"]))
         if (selected := export.dial_in_config_empty_selection(a)) is not None:
             log(f"WARNING: Dial In Config '{a['name']}' selects configuration {selected}, which is empty "
                 "(no applet, alternative text or announcement)")
+    callback_targets = callback_initial_targets(
+        [a for a in applets if a["type"] == export.CALLBACK and a["settings"].get("CallbackInitialPlan")],
+        portal, log, verb)
     routes = [a for a in applets if a["type"] == SHIM]
     unsaved = {}
     if routes:
@@ -831,14 +875,30 @@ def import_plan(
                     log(f"   uploaded {path.name} as '{filename}'")
                 if any(k.startswith("Choices.") for k in nxt):
                     props["Choices"] = {}
+                if a["type"] == export.CALLBACK:
+                    plan_target = a["settings"].get("CallbackInitialPlan")
+                    for k in export.CB_OTHER_PLAN:
+                        props.pop(k, None)
+                    # As the editor posts it: the applet's ID only; VCC fills in its GUID and plan.
+                    props.update(CallbackInitialAppletId=callback_targets.get(a["name"]) if plan_target else None,
+                                 CallbackInitialAppletGuid=None, CallbackInitialInteractionPlanId=None)
                 for key, target in nxt.items():
                     t = by_name[target]
+                    if a["type"] == export.CALLBACK and key == export.CB_INITIAL:
+                        props["CallbackInitialAppletId"] = t.get("id")
+                        continue
+                    if a["type"] == export.CALLBACK and key in export.CB_GUID_APPLETS:
+                        props[f"{key}Guid"] = t.get("guid")
+                        continue
                     if key.startswith("Choices."):
                         props["Choices"][key[len("Choices."):]] = target
                     elif key == "TimeoutApplet":
                         props["TimeoutAppletName"], props["TimeoutAppletGuid"] = target, t.get("guid")
                     elif key == "FailureApplet":
                         props["FailureAppletId"], props["FailureAppletGuid"] = t.get("id"), t.get("guid")
+                    elif a["type"] == export.LOOP_COUNTER and key == export.LC_MAXIMUM:
+                        props["NextAppletIdOnMaximumReached"] = t.get("id")
+                        props["NextAppletGuidOnMaximumReached"] = t.get("guid")
                     elif a["type"] == export.CALL_CONNECT_ROUTER and key in export.CCR_APPLETS:
                         props[f"{key}Id"] = t.get("id")  # by numeric ID only, as the editor saves it
                     else:
@@ -887,6 +947,11 @@ def import_plan(
     diffs = compare(doc, copy, notes)
     # Routes left without their settings were warned about above; their difference is expected.
     diffs = [d for d in diffs if not any(d.startswith(f"'{n}' ") for n in unsaved)]
+    unset = sorted(n for n, i in callback_targets.items() if i is None)
+    diffs = [d for d in diffs if not any(d.startswith(f"'{n}' setting CallbackInitial") for n in unset)]
+    if unset:
+        log(f"NOTE: the comparison leaves out the initial applet of {count(len(unset), 'Callback')} copied with "
+            f"'Return to previous queue' (see the warnings above): {', '.join(unset)}")
     if unsaved:
         log(f"NOTE: the comparison leaves out the {count(len(unsaved), 'Route to Interaction Plan applet')} copied without "
             f"their settings (see the warnings above): {', '.join(sorted(unsaved))}")
