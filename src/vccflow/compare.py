@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from vccflow import export, importer
-from vccflow.portal import PortalClient, skill_description
+from vccflow.portal import ACD_LABELS, PortalClient, skill_description
 
 # Settings whose values may hold credentials: report that they differ, not their values.
 SENSITIVE = re.compile(r"ApiInteractionDefinition|secret|password|token|bearer|authorization|api_?key", re.I)
@@ -128,6 +128,29 @@ def _skill_findings(applet: str, kind: str | None, a: dict, b: dict, report: dic
             report["differences"].append(_about(applet, kind, detail))
 
 
+def _group(g: dict) -> str:
+    """"Espagne (13102022002), overflow after 15 s": an ACD group as the report shows it."""
+    overflow = g.get("TimedOverflow")
+    return f"{g.get('Name')} ({g.get('DisplayId')})" + (f", overflow after {overflow} s" if overflow not in ("", None) else "")
+
+
+def _acd_group_findings(applet: str, kind: str | None, a: dict, b: dict, report: dict) -> None:
+    """Compare an ACD's groups slot by slot (the slot order is the overflow order), rather than as a list."""
+    xs = {g["Slot"]: g for g in a.get("Groups") or []}
+    ys = {g["Slot"]: g for g in b.get("Groups") or []}
+    for slot in sorted(set(xs) | set(ys)):
+        x, y = xs.get(slot), ys.get(slot)
+        if y is None:
+            detail = f"group {slot + 1} {_group(x)} is only in the source"
+        elif x is None:
+            detail = f"group {slot + 1} {_group(y)} is only in the target"
+        elif _group(x) != _group(y):
+            detail = f"group {slot + 1}: source {_group(x)} | target {_group(y)}"
+        else:
+            continue
+        report["differences"].append(_about(applet, kind, detail))
+
+
 def read_plan(portal: PortalClient, plan_id: str, plan_name: str, metadata: dict | None = None) -> dict:
     """Export a plan from VCC to a temporary folder and return the document."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -209,6 +232,11 @@ def compare_docs(source: dict, target: dict) -> dict:
                                                           "are not in the export (made before they were saved)"))
         else:
             sa, sb = a.get("settings") or {}, b.get("settings") or {}
+            if a.get("type") == b.get("type") == export.ACD:
+                _acd_group_findings(name, kind, sa, sb, report)
+                # Fixed choices as the page words them ("Random", "First Retry"); an unknown code stays as it is.
+                sa = {k: ACD_LABELS.get(k, {}).get(str(v), v) for k, v in sa.items() if k != "Groups"}
+                sb = {k: ACD_LABELS.get(k, {}).get(str(v), v) for k, v in sb.items() if k != "Groups"}
             if a.get("type") == b.get("type") == export.SKILL_TAGGER:
                 _skill_findings(name, kind, sa, sb, report)
                 sa = {k: v for k, v in sa.items() if k not in SKILL_LISTS}

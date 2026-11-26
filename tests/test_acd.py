@@ -397,9 +397,33 @@ def test_comparison_reports_groups_presence_and_paths_both_ways():
     del b["next"]["App8"]
     doc = lambda x: {"plan": {}, "applets": [x]}
     diffs = compare_docs(doc(a), doc(b))["differences"]
-    assert "'My Queue' setting Groups[0].Name: source France | target Spain" in diffs
+    assert "'My Queue' group 1: source France (13102022001) | target Spain (13102022001)" in diffs
     assert "'My Queue' setting PostWrapPresenceState: source Ready | target Break" in diffs
     assert "'My Queue' path App8 is missing in the target (source goes to 'MNU Example')" in diffs
     back = compare_docs(doc(b), doc(a))["differences"]
     assert "'My Queue' path App8 is missing in the source (target goes to 'MNU Example')" in back
     assert compare_docs(doc(a), doc(json.loads(json.dumps(a))))["differences"] == []
+
+
+def test_groups_are_compared_slot_by_slot():
+    a = {**acd_with(("France", "13102022001"), ("Portugal", "13102022005")), "kind": "ACD"}
+    a["settings"]["Groups"][1]["TimedOverflow"] = "10"
+    b = {**acd_with(("France", "13102022001"), ("Espagne", "13102022002"), ("Case_Pop", "1001")), "kind": "ACD"}
+    b["settings"]["Groups"][1]["TimedOverflow"] = "15"
+    doc = lambda x: {"plan": {}, "applets": [x]}
+    diffs = [d for d in compare_docs(doc(a), doc(b))["differences"] if "group" in d]
+    assert diffs == [
+        "'My Queue' group 2: source Portugal (13102022005), overflow after 10 s | target Espagne (13102022002), overflow after 15 s",
+        "'My Queue' group 3 Case_Pop (1001) is only in the target"]
+
+
+def test_fixed_choices_are_reported_as_the_page_words_them():
+    a = {**acd_with(("France", "13102022001")), "kind": "ACD"}
+    b = json.loads(json.dumps(a))
+    b["settings"].update(AgentTiebreakAlgorithm="1", BreakoutAvailable="1", WhisperOption="Off", CallRouterAlgorithm="9")
+    doc = lambda x: {"plan": {}, "applets": [x]}
+    diffs = compare_docs(doc(a), doc(b))["differences"]
+    assert "'My Queue' setting AgentTiebreakAlgorithm: source Time since handling last interaction or changing presence "            "(descending) | target Random" in diffs
+    assert "'My Queue' setting BreakoutAvailable: source Always | target First Retry" in diffs
+    assert "'My Queue' setting WhisperOption: source Agent Only | target Off" in diffs
+    assert "'My Queue' setting CallRouterAlgorithm: source Skills based (last in, first out) | target 9" in diffs

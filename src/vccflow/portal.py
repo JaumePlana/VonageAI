@@ -470,6 +470,16 @@ ACD_ALGORITHMS = {"0", "1", "2"}
 ACD_WRAPUP_ALGORITHMS = {"1", "2"}  # HasWrapupTime: the wrap-up time is posted only for these
 ACD_SALESFORCE = ("SalesForceDialledNumber", "FlowDevName", "FallBackQueue")
 ACD_SAVED = "This applet has been saved."
+# The page's wording of the fixed choices (ACD.har): the form posts the code, the report shows the wording.
+ACD_LABELS = {
+    "CallRouterAlgorithm": {"0": "Longest waiting (first in, first out)", "1": "Skills based (first in, first out)",
+                            "2": "Skills based (last in, first out)"},
+    "AgentTiebreakAlgorithm": {"1": "Random", "2": "Time since answering last inbound call (descending)",
+                               "0": "Time since handling last interaction or changing presence (descending)",
+                               "3": "Time since handling last interaction (descending)"},
+    "BreakoutAvailable": {"0": "Always", "1": "First Retry", "2": "Second Retry", "3": "Third Retry"},
+    "WhisperOption": {"Off": "Off", "AgentOnly": "Agent Only"},
+}
 GROUP_LABEL = re.compile(r"^(.*) \(([^()]*)\)$")  # a group option: "France (13102022001)"
 
 
