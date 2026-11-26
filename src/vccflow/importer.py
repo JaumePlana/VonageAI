@@ -20,6 +20,7 @@ from typing import Callable
 from vccflow import export
 from vccflow.scoped_api import ApiError
 from vccflow.skills import GroupsClient, SkillsClient
+from vccflow.schedules import SchedulesClient
 from vccflow.portal import (ACD, ACD_PRESENCE, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
                             acd_groups, acd_presence_states, check_acd, check_shim,
                             data_connector_form, data_router_form, data_router_missing_targets, shim_configured,
@@ -28,6 +29,9 @@ from vccflow.portal import (ACD, ACD_PRESENCE, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PL
 DATA_CONNECTOR = "DataRetriever"
 DATA_ROUTER = export.DATA_ROUTER
 SKILL_TAGGER = export.SKILL_TAGGER
+SCHEDULE_ROUTER = export.SCHEDULE_ROUTER
+# A schedule cloned because the target has one of that name without the source's service statuses.
+AUX_SCHEDULE_PREFIX = "zz vccflow Aux "
 # Auxiliary Set Data Source that makes the data sources the target account lacks exist. VCC
 # refuses to save a Data Router rule whose data source is not in the account's list ("Rule 1:
 # Please select a Data Source from the list"). A data source is in the list only while some
@@ -54,7 +58,7 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -66,6 +70,8 @@ def unsupported_reason(applet: dict) -> str | None:
             skill_tagger_form(applet["settings"], applet.get("next", {}))
         except PortalError as e:
             return str(e)
+    if applet["type"] == SCHEDULE_ROUTER and applet["settings"].get("ScheduleNextAppletMappings"):
+        return "Schedule Router ScheduleNextAppletMappings has not been recorded yet; it cannot be saved"
     if applet["type"] == ACD:
         try:
             check_acd(applet["settings"])
@@ -346,6 +352,70 @@ def _create_groups(groups: GroupsClient, create: list[dict], log: Callable[[str]
     return made
 
 
+def schedule_router_saved(applet: dict) -> bool:
+    """VCC saves a Schedule Router only with a schedule and a default applet ("'Schedule' field is required.",
+    "'Default applet' field is required."): one without them is created and left empty."""
+    return bool(applet["settings"].get("Schedule") and applet.get("next", {}).get("DefaultApplet"))
+
+
+def plan_schedules(applets: list[dict], source: list[dict], target: list[dict]) -> tuple[dict, list[str], list[dict]]:
+    """Choose the target schedule of each Schedule Router, by name, as the user asked (2026-11-26).
+
+    source: the definitions in the export (requires.schedules); target: the target account's schedules
+    ([{"id", "name", "targets"}]). A schedule's service statuses are its "targets". Return (source schedule
+    name -> target schedule name, warnings, schedules to create [{"name", "body"}]):
+    - same name and the same statuses: used as it is;
+    - same name with all the source's statuses and more: used, with a warning (more routings may be needed);
+    - same name without some of the source's statuses: the source schedule is cloned as an auxiliary
+      schedule, "zz vccflow Aux <name>" (reused if it is already there with those statuses), with a warning;
+    - no schedule of that name: the source schedule is cloned with its name, with a warning.
+    Schedule names are case-sensitive in VCC. Without the source definition a clone is impossible: an error.
+    """
+    by_source = {x["name"]: x for x in source}
+    by_target = {x["name"]: x for x in target}
+    chosen, warnings, create = {}, [], []
+    statuses_of = {}
+    for a in applets:
+        if a.get("type") == SCHEDULE_ROUTER and a["settings"].get("Schedule"):
+            name = a["settings"]["Schedule"]
+            own = by_source.get(name, {}).get("targets") or a.get("scheduleStatuses") or                 [k.split(".", 1)[1] for k in a.get("next", {}) if k.startswith("ScheduleMappings.")]
+            statuses_of.setdefault(name, set()).update(own)
+    for name, wanted in sorted(statuses_of.items()):
+        def clone(as_name: str, why: str) -> None:
+            if name not in by_source:
+                raise PortalError(f"Cannot import: schedule '{name}' {why}, and the export has no definition of it to "
+                                  "clone (it was exported without Schedules API access, admin:read)")
+            create.append({"name": as_name, "body": by_source[name]})
+            chosen[name] = as_name
+            warnings.append(f"schedule '{name}' {why}: it is cloned as '{as_name}' in the target account")
+
+        there = by_target.get(name)
+        if there is None:
+            clone(name, "does not exist in the target account")
+            continue
+        have = set(there.get("targets") or [])
+        missing, extra = sorted(wanted - have), sorted(have - wanted)
+        if not missing:
+            chosen[name] = name
+            if extra:
+                warnings.append(f"schedule '{name}' in the target account has more service statuses than in the source: "
+                                f"{', '.join(extra)}. Maybe a routing should be defined for them (they go to the "
+                                "default applet)")
+            continue
+        aux = AUX_SCHEDULE_PREFIX + name
+        why = f"exists in the target account without the service statuses {', '.join(missing)}"
+        old = by_target.get(aux)
+        if old is not None and wanted <= set(old.get("targets") or []):
+            chosen[name] = aux
+            warnings.append(f"schedule '{name}' {why}: the auxiliary schedule '{aux}' already there is used")
+        elif old is not None:
+            raise PortalError(f"Cannot import: schedule '{name}' {why}, and the auxiliary schedule '{aux}' already in "
+                              "the target account lacks them too")
+        else:
+            clone(aux, why)
+    return chosen, warnings, create
+
+
 def _set_path(props: dict, path: str, media_id: int) -> None:
     node = props
     for part in path.split("."):
@@ -402,13 +472,16 @@ def import_plan(
     log: Callable[[str], None] = print,
     skills: SkillsClient | None = None,
     groups: GroupsClient | None = None,
+    schedules: SchedulesClient | None = None,
 ) -> list[str]:
     """Copy the exported plan in plan_dir into the target plan. Return the read-back differences.
 
     skills (the target account's User Admin API) lists its skills and creates those the plan's
     Skill Taggers need; created skills are reported, and deleted again if the import fails.
     groups (the same API) does the same for the groups of the plan's ACDs (see match_groups); their
-    presence states are matched by name (see match_presence_states).
+    presence states are matched by name (see match_presence_states). schedules (the target's Schedules
+    API) chooses or clones the schedules of the plan's Schedule Routers (see plan_schedules); cloned
+    schedules are reported, and deleted again if the import fails.
 
     With skip_unsupported, applets that cannot be imported yet are left out (see drop_unsupported).
     Data sources the plan reads but does not set should exist in the target account. Missing
@@ -505,6 +578,32 @@ def import_plan(
         else:
             groups_to_create = _resolve_acd_lookups(applets, target_groups, lookups["presence"], log, dry_run,
                                                     groups is not None)
+    # Schedule Routers: the schedule by name in the target account (Schedules API, admin:read), cloned
+    # where the target lacks it or its service statuses.
+    routers = [a for a in applets if a["type"] == SCHEDULE_ROUTER]
+    empty_schedule_routers = {a["name"] for a in routers if not schedule_router_saved(a)}
+    chosen_schedules, schedules_to_create = {}, []
+    if len(routers) > len(empty_schedule_routers):
+        target_schedules = None
+        if schedules is not None:
+            try:
+                target_schedules = schedules.list()
+            except ApiError as e:
+                problems_sr = f"the target account's schedules cannot be listed ({e})"
+        if target_schedules is None:
+            raise PortalError("Cannot import the Schedule Routers: "
+                              + (problems_sr if schedules is not None else "no Schedules API client was given"))
+        chosen_schedules, warnings, schedules_to_create = plan_schedules(
+            [a for a in routers if a["name"] not in empty_schedule_routers], doc["requires"].get("schedules") or [],
+            target_schedules)
+        for w in warnings:
+            log(f"WARNING: {w}")
+        if schedules_to_create:
+            log(f"NOTE: {len(schedules_to_create)} schedules {'would be' if dry_run else 'are'} created in the target "
+                f"account: {', '.join(repr(c['name']) for c in schedules_to_create)}")
+    for name in sorted(empty_schedule_routers):
+        log(f"WARNING: Schedule Router '{name}' has no schedule or default applet: it {'would be' if dry_run else 'is'} "
+            "created empty and not saved (VCC needs both to save it)")
     log(f"Checks passed: {len(applets)} applets from '{doc['plan']['name']}' into '{target_plan_name}'")
     missing_targets = {a["name"]: m for a in applets if a["type"] == DATA_ROUTER
                        and (m := data_router_missing_targets(a["settings"], a.get("next", {})))}
@@ -546,6 +645,7 @@ def import_plan(
     created: list[str] = []
     created_skills: list[dict] = []
     created_groups: list[dict] = []
+    created_schedules: list[dict] = []
     try:
         if skills_to_create:
             log("0. Creating the missing skills")
@@ -554,6 +654,16 @@ def import_plan(
                 log(f"   NEW SKILL created in the target account: '{name}'")
         if groups_to_create:
             created_groups += _create_groups(groups, groups_to_create, log)
+        if schedules_to_create:
+            log("0. Creating the missing schedules")
+            for c in schedules_to_create:
+                saved, _, notes = schedules.copy_to(c["body"], c["name"])
+                created_schedules.append(saved)
+                log(f"   NEW SCHEDULE created in the target account: '{c['name']}' "
+                    f"(service statuses: {', '.join(saved.get('targets') or [])})")
+                for n in notes:
+                    log(f"   NOTE: {n}")
+        schedule_ids = {x["name"]: x["id"] for x in schedules.list()} if chosen_schedules else {}
         if to_create:
             log(f"0. Making the data sources exist through '{AUX_SDS}'")
             if not aux_in_target:
@@ -587,6 +697,23 @@ def import_plan(
                                 {m["property"]: plan_dir / m["file"] for m in a.get("media", [])})
                 if a.get("media"):
                     log(f"   uploaded {len(a['media'])} audio files: {', '.join(m['property'] for m in a['media'])}")
+            elif a["type"] == SCHEDULE_ROUTER and a["name"] in empty_schedule_routers:
+                log(f"   {a['name']}: Schedule Router created empty and not saved (see the warning above)")
+                continue
+            elif a["type"] == SCHEDULE_ROUTER:
+                schedule = chosen_schedules[a["settings"]["Schedule"]]
+                guid = schedule_ids[schedule]
+                props = dict(portal.get_applet_state(target_plan_id, by_name[a["name"]])["appletProperties"])
+                props.update({k: v for k, v in a["settings"].items() if k != "Schedule"})
+                # As the editor saves it (scheduleRouter.har): the schedule GUID, applets by numeric ID, and
+                # one mapping per routed service status, keyed "<schedule GUID>:<status>".
+                props["Schedule"] = guid
+                props["DefaultAppletId"] = by_name[nxt["DefaultApplet"]]["id"]
+                props["FailureAppletId"] = by_name[nxt["FailureApplet"]]["id"] if nxt.get("FailureApplet") else None
+                props["ScheduleMappings"] = {f"{guid}:{k.split('.', 1)[1]}": by_name[t]["id"]
+                                             for k, t in nxt.items() if k.startswith("ScheduleMappings.")}
+                portal.save_applet(target_plan_id, a["name"], props)
+                a["settings"]["Schedule"] = schedule  # the read-back shows the target's schedule
             elif a["type"] == SHIM and a["name"] in unsaved:
                 log(f"   {a['name']}: Route to Interaction Plan created without its settings (see the warning above)")
                 continue
@@ -636,6 +763,12 @@ def import_plan(
                 portal.delete_applet(target_plan_id, name)
             except PortalError as e:
                 log(f"   could not delete '{name}': {e}")
+        for c in created_schedules:
+            try:
+                schedules.delete(c["id"])
+                log(f"   deleted the schedule it created: '{c['name']}'")
+            except ApiError as e:
+                log(f"   could not delete the schedule it created, '{c.get('name')}': {e}")
         for g in created_groups:
             try:
                 groups.delete(g["groupId"])

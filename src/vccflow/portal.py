@@ -1006,11 +1006,16 @@ class PortalClient:
             raise PortalError(f"Creating '{name}' did not open the applet editor: {resp.headers.get('Location')}")
 
     def save_applet(self, plan_id: str, name: str, properties: dict) -> dict:
+        """Save a React editor's applet. VCC refuses with {"errors": [...]}, e.g. "'Schedule' field is required."
+        (scheduleRouter.har): that is an error here, not a silent success."""
         self._require_writes()
-        return self._json(
+        body = self._json(
             "Applet/Save",
             {"interactionPlanId": plan_id, "appletName": name, "appletProperties": encode_properties(properties)},
         )
+        if isinstance(body, dict) and body.get("errors"):
+            raise PortalError(f"Saving '{name}' was refused: {'; '.join(map(str, body['errors']))}")
+        return body
 
     def upload_media(self, plan_id: str, applet_name: str, path: Path, filename: str | None = None) -> int:
         """Upload an audio file for an applet, as the Announcer editor does. Return its appletMediaId."""

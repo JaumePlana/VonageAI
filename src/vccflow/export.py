@@ -26,6 +26,9 @@ from vccflow.portal import (ACD, ACD_DATA_SOURCES, SHIM, SHIM_IVR_BOXES, SKILL_T
                             acd_settings)
 
 FORMAT = "vccflow.plan/1"
+SCHEDULE_ROUTER = "ScheduleRouter"
+# A Schedule Router editor lists one mapping field per service status of each schedule (scheduleRouter.har).
+SCHEDULE_MAPPING_PROP = re.compile(r"^ScheduleMappings\[([^:\]]+):(.*)\]$")
 DATA_ROUTER = "DataRouter"
 SKILL_TAGGER = "SkillTagger"
 # Skill Tagger personal queue settings: each names a data source.
@@ -131,6 +134,30 @@ def split_shim(page: dict) -> tuple[dict, dict]:
         **{k: bool(page.get(k)) for k in SHIM_IVR_BOXES},
     }
     return settings, ({"FailureApplet": page["FailureApplet"]} if page.get("FailureApplet") else {})
+
+
+def schedules_in_metadata(metadata: Any) -> list[dict]:
+    """The schedules a Schedule Router editor offers: [{"id", "name", "targets"}], targets being the
+    service statuses it lists a mapping field for (in the editor's order)."""
+    names = {}
+    statuses: dict[str, list[str]] = {}
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            prop = x.get("prop")
+            if prop == "Schedule" and isinstance(x.get("options"), list):
+                names.update({o["value"]: o.get("label") for o in x["options"] if isinstance(o, dict) and o.get("value")})
+            m = SCHEDULE_MAPPING_PROP.match(prop) if isinstance(prop, str) else None
+            if m:
+                statuses.setdefault(m.group(1), []).append(m.group(2))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(metadata)
+    return [{"id": guid, "name": name, "targets": statuses.get(guid, [])} for guid, name in names.items()]
 
 
 def option_labels(metadata: Any) -> dict[str, str]:
@@ -410,6 +437,10 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
     state = portal.get_applet_state(plan_id, applet)
     props = state["appletProperties"]
     entry["type"] = props.get("AppletType")
+    if entry["type"] == SCHEDULE_ROUTER:
+        # The schedule's service statuses, as the editor lists them: what a copy must find in the target.
+        own = next((x for x in schedules_in_metadata(state.get("metadata")) if x["id"] == props.get("Schedule")), None)
+        entry["scheduleStatuses"] = own["targets"] if own else []
     listed = listed or []
     problems = broken_connection_ids(applet["name"], props, listed) if listed else []
     # Types import-plan writes keep their settings as VCC sends them. The others are only exported
@@ -454,6 +485,25 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
     return entry
 
 
+def _used_schedules(schedules: Any, applets: list[dict], log: Callable[[str], None]) -> list[dict]:
+    """The definitions of the schedules the plan's Schedule Routers use (schedules: a SchedulesClient for
+    the account, admin:read), so a copy can clone one the target account lacks. None without the API."""
+    names = {a["settings"].get("Schedule") for a in applets if a.get("type") == SCHEDULE_ROUTER} - {None, ""}
+    if not names or schedules is None:
+        return []
+    from vccflow.schedules import body_of  # schedules imports portal, as this module does
+    from vccflow.scoped_api import ApiError
+    try:
+        listed = schedules.list()
+    except ApiError as e:
+        log(f"    WARNING: schedule definitions not exported ({e}): a copy cannot clone a schedule the target lacks")
+        return []
+    found = [body_of(x) for x in listed if x.get("name") in names]
+    for n in sorted(names - {x["name"] for x in found}):
+        log(f"    WARNING: schedule '{n}' used by a Schedule Router is not in the account's schedule list")
+    return sorted(found, key=lambda x: x["name"])
+
+
 def export_plan(
     portal: PortalClient,
     plan_id: str,
@@ -461,8 +511,12 @@ def export_plan(
     out_dir: Path,
     metadata: dict | None = None,
     log: Callable[[str], None] = print,
+    schedules: Any = None,
 ) -> dict:
-    """Export a plan to out_dir/plan.json (+ media/). Return the plan document."""
+    """Export a plan to out_dir/plan.json (+ media/). Return the plan document.
+
+    schedules (a SchedulesClient for the account): also save the definitions of the schedules the
+    plan's Schedule Routers use, in requires.schedules, for a copy to clone where they are missing."""
     media_dir = out_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     listing = portal.list_applets(plan_id)
@@ -491,6 +545,7 @@ def export_plan(
     initial = portal.get_initial_applet(plan_id)
     if initial is None:
         log("    WARNING: the plan has no initial applet")
+    used_schedules = _used_schedules(schedules, applets, log)
     data_sources = sorted(set().union(*(collect_data_sources(a) for a in applets)) if applets else set())
     doc = {
         "format": FORMAT,
@@ -505,7 +560,8 @@ def export_plan(
             "initialApplet": initial,
             **({k: metadata.get(k) for k in PLAN_SETTINGS if k in metadata} if metadata else {}),
         },
-        "requires": {"dataSources": data_sources, "dataSourcesNeeded": sorted(data_sources_needed(applets))},
+        "requires": {"dataSources": data_sources, "dataSourcesNeeded": sorted(data_sources_needed(applets)),
+                     **({"schedules": used_schedules} if used_schedules else {})},
         "applets": applets,
     }
     (out_dir / "plan.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")

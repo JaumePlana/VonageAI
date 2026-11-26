@@ -261,7 +261,8 @@ def _export(portal: PortalClient, api: ManagerClient | None, plan: str, out: str
     metadata = _plan_metadata(portal, api, plan_id)
     folder = Path(out or f"exports/{account}/plans/{export._safe_filename(plan_name)}")
     print(f"Exporting '{plan_name}' from '{account}' to {folder}")
-    doc = export.export_plan(portal, plan_id, plan_name, folder, metadata=metadata)
+    doc = export.export_plan(portal, plan_id, plan_name, folder, metadata=metadata,
+                             schedules=SchedulesClient(portal.account))
     n_media = sum(len(a.get("media", [])) for a in doc["applets"])
     print(f"Saved {folder / 'plan.json'}: {len(doc['applets'])} applets, {n_media} media files")
     if doc["requires"]["dataSources"]:
@@ -280,7 +281,8 @@ def _import(portal: PortalClient, source: Path, plan_id: str, plan_name: str, ar
                                  skip_unsupported=args.skip_unsupported,
                                  require_data_sources=args.require_data_sources,
                                  skills=SkillsClient(portal.account),
-                                 groups=GroupsClient(portal.account))
+                                 groups=GroupsClient(portal.account),
+                                 schedules=SchedulesClient(portal.account))
     if dry_run:
         print("Dry run: nothing was changed.")
     elif diffs:
