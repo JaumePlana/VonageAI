@@ -64,6 +64,19 @@ IMPORTABLE_EDITOR_TYPES = {"DataAnnouncer", "SetDataSource", "Menu", "Priority"}
 # with a number (0.5) and the editor posts a string ("0.9"); both are saved.
 PRIORITY = "Priority"
 PRIORITY_LABELS = {"0.9": "Highest", "0.75": "Higher", "0.5": "Normal", "0.25": "Lower", "0.1": "Lowest"}
+# Call Connect Router (callConnectRouter.har): a React editor, appletType "CallDivert". Its applets are
+# numeric IDs (CallCompleteAppletId, UnsuccessfulCallAppletId), exported by name. VCC derives NextApplet
+# from UnsuccessfulCallAppletId (not copied when equal) and TryAgentsMoreThanOnce from RetryAgents; LastPosition is not in the
+# editor (rotary routing's position): none of them is copied or compared.
+CALL_CONNECT_ROUTER = "CallDivert"
+CCR_NOT_COPIED = {"TryAgentsMoreThanOnce", "LastPosition"}
+CCR_SETTINGS = {"DeliveryNumbers", "DistributionType", "NoAnswerTimeout", "RetryAgents", "GroupTimeout",
+                "OnHoldAnnouncement", "RingingAudio", "WhisperAudio", "WhisperOption", "SendToAllAgents",
+                "OnHoldAnnouncementPath", "RingingAudioPath", "WhisperAudioPath"}
+CCR_CHOICES = {"DistributionType": ("Sequential", "Rotary"), "WhisperOption": ("Off", "Agent", "AgentAndCaller")}
+CCR_APPLETS = ("CallCompleteApplet", "UnsuccessfulCallApplet")
+# A delivery number: a data source, $(name), or an E.164 number, +<country code><digits> (user, 2026-11-26).
+CCR_NUMBER = re.compile(r"\$\([^()]+\)|\+[0-9]+")
 GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
@@ -325,6 +338,28 @@ def dial_in_config_empty_selection(applet: dict) -> int | None:
     return selected if selected in dial_in_config_empty(applet["settings"], applet.get("next", {}), audio) else None
 
 
+def call_connect_router_problems(settings: dict) -> list[str]:
+    """Why a Call Connect Router cannot be saved as it is: what the recording does not show, or what VCC
+    refuses (an empty timeout answers HTTP 500)."""
+    problems = []
+    unknown = sorted(set(settings) - CCR_SETTINGS)
+    if unknown:
+        problems.append(f"Call Connect Router settings {', '.join(unknown)} have not been recorded yet")
+    for key, choices in CCR_CHOICES.items():
+        if settings.get(key) not in choices:
+            problems.append(f"Call Connect Router {key} {settings.get(key)!r} is not one of {', '.join(choices)}")
+    for key in ("NoAnswerTimeout", "GroupTimeout"):
+        v = settings.get(key)
+        if not (isinstance(v, int) or (isinstance(v, str) and v.isdigit())) or not 0 <= int(v) <= 9999:
+            problems.append(f"Call Connect Router {key} {v!r} is not 0 to 9999 seconds")
+    for n in settings.get("DeliveryNumbers") or []:
+        value = n.get("Value") if isinstance(n, dict) else None
+        if not isinstance(value, str) or not CCR_NUMBER.fullmatch(value):
+            problems.append(f"Call Connect Router delivery number {value!r} is not a data source, $(name), "
+                            "or an international number, +<country code><digits>")
+    return problems
+
+
 def data_sources_used(applet: dict) -> set[str]:
     """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
     a Data Router rule's data source, a Salesforce match data source, the values a
@@ -508,6 +543,10 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         resolved = {("ScheduleMappings." + k[len(own):]) if k.startswith(own) else k: v for k, v in resolved.items()}
     settings, nxt = split_connections(props, {a["id"]: a["name"] for a in listed if a.get("id")})
     nxt.update(resolved)
+    if entry["type"] == CALL_CONNECT_ROUTER:
+        if nxt.get("NextApplet") == nxt.get("UnsuccessfulCallApplet"):
+            nxt.pop("NextApplet", None)  # VCC's copy of UnsuccessfulCallApplet; another value is kept
+        settings = {k: v for k, v in settings.items() if k not in CCR_NOT_COPIED}
     if by_name:
         labels = option_labels(state.get("metadata"))
         settings, nxt = relabel(settings, labels), relabel(nxt, labels)

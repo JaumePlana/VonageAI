@@ -69,7 +69,7 @@ def unsupported_reason(applet: dict) -> str | None:
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
     if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER,
-                                               DIAL_IN_CONFIG, COLLECT_INPUT}:
+                                               DIAL_IN_CONFIG, COLLECT_INPUT, export.CALL_CONNECT_ROUTER}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -95,6 +95,13 @@ def unsupported_reason(applet: dict) -> str | None:
             check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
+    if applet["type"] == export.CALL_CONNECT_ROUTER:
+        problems = export.call_connect_router_problems(applet["settings"])
+        extra = sorted(set(applet.get("next", {})) - set(export.CCR_APPLETS))
+        if extra:
+            problems.append(f"Call Connect Router connections {', '.join(extra)} have not been recorded yet")
+        if problems:
+            return "; ".join(problems)
     if applet["type"] == COLLECT_INPUT:
         try:
             check_collect_input(applet["settings"], applet.get("next", {}))
@@ -832,6 +839,8 @@ def import_plan(
                         props["TimeoutAppletName"], props["TimeoutAppletGuid"] = target, t.get("guid")
                     elif key == "FailureApplet":
                         props["FailureAppletId"], props["FailureAppletGuid"] = t.get("id"), t.get("guid")
+                    elif a["type"] == export.CALL_CONNECT_ROUTER and key in export.CCR_APPLETS:
+                        props[f"{key}Id"] = t.get("id")  # by numeric ID only, as the editor saves it
                     else:
                         props[key] = target
                         props[f"{key}Guid"] = t.get("guid")
