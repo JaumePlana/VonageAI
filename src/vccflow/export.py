@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from vccflow.portal import (ACD, ACD_DATA_SOURCES, DIAL_IN_CONFIG, DIC_PAGE, SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS,
-                            PortalClient, PortalError, acd_settings, dial_in_config_empty,
+from vccflow.portal import (ACD, ACD_DATA_SOURCES, CI_PAGE, COLLECT_INPUT, DIAL_IN_CONFIG, DIC_PAGE, SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS,
+                            PortalClient, PortalError, acd_settings, collect_input_settings, dial_in_config_empty,
                             dial_in_config_settings)
 
 FORMAT = "vccflow.plan/1"
@@ -293,6 +293,8 @@ def data_sources_created(applet: dict) -> set[str]:
     """
     s = applet.get("settings", {})
     found = {ds["Key"] for ds in s.get("DataSources") or [] if ds.get("Key")}
+    if applet.get("type") == COLLECT_INPUT and s.get("CollectToDataSource") and s.get("DataSource"):
+        found.add(s["DataSource"])  # the collected digits; VCC creates a new data source by that name
     for text in _strings(s):
         found.update(x.strip() for x in XML_DESTINATION.findall(text))
     crm = s.get("CrmRetrievalViewModel") or {}
@@ -336,7 +338,7 @@ def data_sources_used(applet: dict) -> set[str]:
             found.add(rule["LeftHandDataSource"])
     found = {n for n in found if n.lower() not in RESERVED}
     for key in ("DataSource", "AnnouncementDataSource"):
-        if s.get(key):
+        if s.get(key) and not (key == "DataSource" and applet.get("type") == COLLECT_INPUT):
             found.add(s[key])
     if s.get("IsDynamicVoice") and s.get("VoiceDataSource"):  # Menu voice taken from a data source
         found.add(s["VoiceDataSource"])
@@ -432,6 +434,22 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
             filename = f"{_safe_filename(applet['name'] + ' ' + slot)}{Path(path).suffix or '.wav'}"
             (media_dir / filename).write_bytes(content)
             # VCC stores the file under a GUID: the uploaded file's name is not kept, so it is compared by content.
+            media.append({"property": slot, "file": f"media/{filename}", "name": None,
+                          "sha256": hashlib.sha256(content).hexdigest()})
+        if media:
+            entry["media"] = media
+        return entry
+
+    if config_url.startswith(CI_PAGE):
+        page = portal.get_collect_input(applet)
+        entry["type"] = COLLECT_INPUT
+        entry["settings"], entry["next"] = collect_input_settings(page)
+        media = []
+        for slot, path in sorted(page["audio"].items()):
+            content = portal.download_recording(path)
+            filename = f"{_safe_filename(applet['name'] + ' ' + slot)}{Path(path).suffix or '.wav'}"
+            (media_dir / filename).write_bytes(content)
+            # Stored under a GUID, as for an ACD: the uploaded file's name is not kept; compared by content.
             media.append({"property": slot, "file": f"media/{filename}", "name": None,
                           "sha256": hashlib.sha256(content).hexdigest()})
         if media:

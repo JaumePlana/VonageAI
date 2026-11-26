@@ -241,6 +241,10 @@ def compare_docs(source: dict, target: dict) -> dict:
                 # As the page words them ("Highest"): VCC sends 0.9 and the editor posts "0.9".
                 sa = {k: export.PRIORITY_LABELS.get(str(v), v) if k == "Priority" else v for k, v in sa.items()}
                 sb = {k: export.PRIORITY_LABELS.get(str(v), v) if k == "Priority" else v for k, v in sb.items()}
+            if a.get("type") == b.get("type") == export.COLLECT_INPUT:
+                # "Maximum input prompts" as the page words it: 0 is "Maximum".
+                sa = {k: "Maximum" if k == "TimeoutCount" and str(v) == "0" else v for k, v in sa.items()}
+                sb = {k: "Maximum" if k == "TimeoutCount" and str(v) == "0" else v for k, v in sb.items()}
             if a.get("type") == b.get("type") == export.SKILL_TAGGER:
                 _skill_findings(name, kind, sa, sb, report)
                 sa = {k: v for k, v in sa.items() if k not in SKILL_LISTS}

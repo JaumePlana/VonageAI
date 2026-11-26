@@ -21,8 +21,8 @@ from vccflow import export
 from vccflow.scoped_api import ApiError
 from vccflow.skills import GROUP_DEFAULT_MAX_TIME, GroupsClient, SkillsClient
 from vccflow.schedules import SchedulesClient
-from vccflow.portal import (ACD, ACD_PRESENCE, DIAL_IN_CONFIG, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
-                            acd_groups, acd_presence_states, check_acd, check_dial_in_config, check_shim,
+from vccflow.portal import (ACD, ACD_PRESENCE, CI_AUDIO, COLLECT_INPUT, DIAL_IN_CONFIG, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
+                            acd_groups, acd_presence_states, check_acd, check_collect_input, check_dial_in_config, check_shim,
                             data_connector_form, data_router_form, data_router_missing_targets, shim_configured,
                             skill_tagger_form)
 
@@ -69,7 +69,7 @@ def unsupported_reason(applet: dict) -> str | None:
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
     if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER,
-                                               DIAL_IN_CONFIG}:
+                                               DIAL_IN_CONFIG, COLLECT_INPUT}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -95,6 +95,14 @@ def unsupported_reason(applet: dict) -> str | None:
             check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
+    if applet["type"] == COLLECT_INPUT:
+        try:
+            check_collect_input(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+        wrong = [m["property"] for m in applet.get("media", []) if m["property"] not in CI_AUDIO]
+        if wrong:
+            return f"Collect Input audio {', '.join(wrong)} is not one of its audio files"
     if applet["type"] == DIAL_IN_CONFIG:
         try:
             check_dial_in_config(applet["settings"], applet.get("next", {}))
@@ -780,6 +788,11 @@ def import_plan(
                                              for k, t in nxt.items() if k.startswith("ScheduleMappings.")}
                 portal.save_applet(target_plan_id, a["name"], props)
                 a["settings"]["Schedule"] = schedule  # the read-back shows the target's schedule
+            elif a["type"] == COLLECT_INPUT:
+                portal.save_collect_input(target_plan_id, a["name"], a["settings"], nxt,
+                                          {m["property"]: plan_dir / m["file"] for m in a.get("media", [])})
+                if a.get("media"):
+                    log(f"   uploaded {count(len(a['media']), 'audio file')}: {', '.join(m['property'] for m in a['media'])}")
             elif a["type"] == DIAL_IN_CONFIG:
                 audio = {int(m["property"].split(".")[1]): plan_dir / m["file"] for m in a.get("media", [])}
                 portal.save_dial_in_config(target_plan_id, a["name"], a["settings"], nxt, audio)

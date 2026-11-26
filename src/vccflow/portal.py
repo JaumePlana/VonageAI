@@ -706,6 +706,110 @@ def dial_in_config_empty(settings: dict, nxt: dict, audio: set) -> list[int]:
     return [i for i in DIC_CONFIGS if not (settings.get(f"AltText.{i}") or nxt.get(f"NextApplet.{i}") or i in audio)]
 
 
+# Collect Input (appletType "DigitStringCollection", collectInput.har): an MVC page, CollectDtmfTones, posting
+# a multipart form back to itself ("This applet has been saved."; a refusal is listed in the same summary,
+# e.g. "Next applet after maximum input prompts: Must be set if 'Maximum input prompts' is not 'Maximum'").
+# The digits go to an IVR slot or a data source: only the data source is supported (user, 2026-11-26);
+# a new data source name creates the data source. Each audio file's "Play Existing" link follows its input;
+# a post without a file keeps the file, so audio cannot be removed. The Playback and Confirmation fields are
+# posted only with "Confirmation prompt?" ticked; unticking it clears their texts and keeps their audio.
+COLLECT_INPUT = "DigitStringCollection"
+CI_PAGE = "CollectDtmfTones"
+CI_AUDIO = ("InitialAudioFile", "PlaybackAudioFile", "ConfirmationAudioFile")
+CI_CONFIRM_AUDIO = ("PlaybackAudioFile", "ConfirmationAudioFile")
+CI_CONFIRM_TEXT = ("PlaybackTextToSpeak", "ConfirmationTextToSpeak")
+CI_SETTINGS = ("InitialTextToSpeak", "MaxDigitCount", "CollectToDataSource", "DataSource", "TimeoutCount",
+               "ConfirmInput", *CI_CONFIRM_TEXT)
+CI_NEXT = {"NextApplet": "NextApplet", "TimeoutApplet": "TimeoutAppletName"}  # next key -> form field
+CI_MAXIMUM = "0"  # "Maximum input prompts": "Maximum"; 1-10 need the next applet after them
+CI_TIMEOUT_COUNTS = {str(i) for i in range(11)}
+CI_SAVED = "This applet has been saved."
+CI_SUMMARY = re.compile(r'data-valmsg-summary="true"[^>]*>\s*<ul>(.*?)</ul>', re.S)
+CI_PLAY = re.compile(r'name="(\w+AudioFile)".*?</td>\s*<td>\s*(?:<a href="\.\./(recordings/[^"]+)")?', re.S)
+
+
+def extract_collect_input(html: str) -> dict:
+    """A Collect Input page: {"form": _WebForm, "audio": {slot: existing file path}}; refuses another page."""
+    form = _web_form(html)
+    if "MaxDigitCount" not in form.fields or "TimeoutCount" not in form.fields:
+        raise PortalError("Not a Collect Input page (no maximum digits field); the page format may have changed")
+    audio = {slot: html_lib.unescape(path) for slot, path in CI_PLAY.findall(html) if slot in CI_AUDIO and path}
+    return {"form": form, "audio": audio}
+
+
+def collect_input_settings(page: dict) -> tuple[dict, dict]:
+    """(settings, next) of a Collect Input page: the next applets by name."""
+    form = page["form"]
+    f = form.fields
+    settings = {k: f.get(k, "") for k in CI_SETTINGS}
+    settings["CollectToDataSource"] = "CollectToDataSource" in form.checked
+    settings["ConfirmInput"] = "ConfirmInput" in form.checked
+    if not settings["CollectToDataSource"]:
+        settings["IvrSlot"] = f.get("IvrSlot", "")
+    nxt = {key: f[field] for key, field in CI_NEXT.items() if f.get(field)}
+    return settings, nxt
+
+
+def check_collect_input(settings: dict, nxt: dict) -> None:
+    """Refuse what was not recorded, or what VCC refuses, before any request."""
+    unknown = sorted(set(settings) - set(CI_SETTINGS) - {"IvrSlot"})
+    if unknown:
+        raise PortalError(f"Collect Input settings {', '.join(unknown)} have not been recorded yet; they cannot be saved")
+    if not settings.get("CollectToDataSource"):
+        raise PortalError("Collect Input storing the digits in an IVR slot is not supported (IVR slots); only a "
+                          "data source is")
+    if not settings.get("DataSource"):
+        raise PortalError("Collect Input has no destination data source, which VCC requires (\"Data Source must "
+                          "have a value\")")
+    if str(settings.get("TimeoutCount")) not in CI_TIMEOUT_COUNTS:
+        raise PortalError(f"Collect Input maximum input prompts {settings.get('TimeoutCount')!r} is not "
+                          "'Maximum' or 1 to 10")
+    if str(settings["TimeoutCount"]) != CI_MAXIMUM and not nxt.get("TimeoutApplet"):
+        raise PortalError("Collect Input has maximum input prompts "
+                          f"{settings['TimeoutCount']} and no next applet after them, which VCC refuses "
+                          "(\"Must be set if 'Maximum input prompts' is not 'Maximum'\")")
+    if not settings.get("ConfirmInput") and any(settings.get(k) for k in CI_CONFIRM_TEXT):
+        raise PortalError("Collect Input playback / confirmation texts are only kept with the confirmation prompt")
+
+
+def collect_input_form(settings: dict, nxt: dict, uploads: dict[str, tuple[str, bytes]] | None = None,
+                       confirm: bool | None = None) -> list[tuple[str, Any]]:
+    """The Collect Input post, in the order the page posts it (collectInput.har), token excluded.
+
+    uploads: audio slot -> (file name, content); other slots post an empty file part, which keeps a file
+    already there. confirm: post "Confirmation prompt?" so (default: the setting); its fields are posted
+    only when ticked. Each value is a string, or (file name, content, content type)."""
+    check_collect_input(settings, nxt)
+    uploads = uploads or {}
+    confirm = settings.get("ConfirmInput") if confirm is None else confirm
+
+    def audio(slot: str) -> tuple[str, Any]:
+        if slot in uploads:
+            name, content = uploads[slot]
+            return slot, (name, content, "audio/wav")
+        return slot, ("", b"", "application/octet-stream")
+
+    out: list[tuple[str, Any]] = [
+        audio("InitialAudioFile"),
+        ("InitialTextToSpeak", settings.get("InitialTextToSpeak") or ""),
+        ("MaxDigitCount", str(settings.get("MaxDigitCount") or "")),
+        ("CollectToDataSource", "true"), ("CollectToDataSource", "false"),
+        ("IvrSlot", ""),
+        ("DataSource", settings["DataSource"]),
+        ("NextApplet", nxt.get("NextApplet") or ""),
+        ("TimeoutCount", str(settings["TimeoutCount"])),
+        ("TimeoutAppletName", nxt.get("TimeoutApplet") or ""),
+    ]
+    if confirm:
+        out += [("ConfirmInput", "true"), ("ConfirmInput", "false"),
+                audio("PlaybackAudioFile"), ("PlaybackTextToSpeak", settings.get("PlaybackTextToSpeak") or ""),
+                audio("ConfirmationAudioFile"),
+                ("ConfirmationTextToSpeak", settings.get("ConfirmationTextToSpeak") or "")]
+    else:
+        out.append(("ConfirmInput", "false"))
+    return out
+
+
 def extract_initial_applet(html: str, plan_id: str) -> str | None:
     m = re.search(INITIAL_APPLET.format(plan_id=re.escape(plan_id)), html, re.S)
     if not m:
@@ -1287,6 +1391,60 @@ class PortalClient:
         if ACD_SAVED not in resp.text:
             raise PortalError(f"Saving ACD '{name}' was not confirmed (no \"{ACD_SAVED}\")")
         return extract_acd(resp.text)
+
+    def get_collect_input(self, applet: dict) -> dict:
+        """Return extract_collect_input() for a Collect Input from list_applets()."""
+        return extract_collect_input(self._request("GET", applet["configUrl"]).text)
+
+    def save_collect_input(self, plan_id: str, name: str, settings: dict, nxt: dict,
+                           audio: dict[str, Path] | None = None) -> dict:
+        """Save a Collect Input as its page does (collectInput.har): one multipart post with every field and
+        the audio files. Playback / confirmation audio of an applet whose confirmation prompt is off is
+        uploaded with the prompt on, then a second post turns it off (VCC keeps that audio). Returns
+        extract_collect_input() of the page read back, after checking every setting, connection and audio."""
+        self._require_writes()
+        check_collect_input(settings, nxt)
+        audio = audio or {}
+        wrong = sorted(set(audio) - set(CI_AUDIO))
+        if wrong:
+            raise PortalError(f"Collect Input '{name}': {', '.join(wrong)} is not an audio slot")
+        uploads = {}
+        for slot, path in audio.items():
+            if path.stat().st_size > MAX_MEDIA_BYTES:
+                raise PortalError(f"{path} is larger than 10 MB, which the portal refuses")
+            uploads[slot] = (path.name, path.read_bytes())
+        page_url = f"{CI_PAGE}?phoneNum={quote(plan_id)}&myApp={quote(name)}"
+        page = extract_collect_input(self._request("GET", f"{page_url}&application={COLLECT_INPUT}").text)
+        offered = {v for v, _ in page["form"].options.get("NextApplet", []) if v}
+        missing = sorted(v for v in nxt.values() if v not in offered)
+        if missing:
+            raise PortalError(f"Collect Input '{name}': applets not offered by the page: {', '.join(missing)}")
+        posts = [None]
+        if not settings.get("ConfirmInput") and any(s in uploads for s in CI_CONFIRM_AUDIO):
+            posts = [True, False]
+        for confirm in posts:
+            token = page["form"].fields.get("__RequestVerificationToken")
+            if not token:
+                raise PortalError(f"Collect Input page for '{name}' has no form token")
+            sent = uploads if confirm is not False else {}
+            parts = collect_input_form({**settings, "PlaybackTextToSpeak": "", "ConfirmationTextToSpeak": ""}
+                                       if confirm else settings, nxt, sent, confirm)
+            files = [("__RequestVerificationToken", (None, token))]
+            files += [(k, (None, v) if isinstance(v, str) else v) for k, v in parts]
+            resp = self._request("POST", page_url, headers={"Referer": f"{self.base}/{page_url}"}, files=files)
+            if CI_SAVED not in resp.text:
+                summary = CI_SUMMARY.search(resp.text)
+                message = re.sub(r"<[^>]+>|\s+", " ", summary.group(1)).strip() if summary else ""
+                raise PortalError(f"Saving Collect Input '{name}' was refused: {message or 'not confirmed'}")
+            page = extract_collect_input(resp.text)
+        got, got_next = collect_input_settings(page)
+        wrong = [f"{k} {got.get(k)!r}" for k in CI_SETTINGS if str(got.get(k)) != str(settings.get(k, "") if
+                 k not in ("CollectToDataSource", "ConfirmInput") else bool(settings.get(k)))]
+        wrong += [f"{k} {got_next.get(k, '')!r}" for k in CI_NEXT if got_next.get(k, "") != nxt.get(k, "")]
+        wrong += [f"{s} {'missing' if s in audio else 'present'}" for s in CI_AUDIO if (s in page["audio"]) != (s in audio)]
+        if wrong:
+            raise PortalError(f"Collect Input '{name}' reads back with {', '.join(wrong)}")
+        return page
 
     def get_dial_in_config(self, applet: dict) -> dict:
         """Return extract_dial_in_config() for a Dial In Config from list_applets()."""
