@@ -155,7 +155,7 @@ def test_skills_are_matched_without_letter_case():
     a = exported(Skills=[{"Name": "de", "Necessity": 2}, {"Name": "Chat", "Necessity": 1}, {"Name": "Nope", "Necessity": 1}])
     spellings, missing, notes = check_skills([a], ["Chat", "DE"])
     assert spellings == {"de": "DE"}
-    assert missing == {"Nope": "skill 'Nope' is used by ST Sample but does not exist in the target account"}
+    assert missing == {"Nope": "skill 'Nope' does not exist in the target account (used by ST Sample)"}
     assert notes == ["skill 'de' exists in the target account as 'DE': that spelling is used"]
 
 
@@ -224,7 +224,7 @@ def test_import_saves_the_skill_tagger_with_the_target_spelling(tmp_path, monkey
 def test_missing_skill_without_the_user_admin_api_stops_before_any_write(tmp_path):
     write_doc(tmp_path, exported())
     portal = FakePortal(["Chat"])
-    with pytest.raises(PortalError, match="skill 'External' is used by ST Sample but does not exist"):
+    with pytest.raises(PortalError, match="skill 'External' does not exist in the target account \\(used by ST Sample\\)"):
         import_plan(portal, tmp_path, PLAN_ID, "Scratch", log=lambda _: None)
     assert portal.writes == []
 
@@ -345,6 +345,9 @@ def test_missing_skills_are_created_and_reported(tmp_path, monkeypatch):
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", log=logs.append, skills=skills)
     assert skills.created == ["External"]
     assert any("NEW SKILL created in the target account: 'External'" in m for m in logs)
+    # Warned about before any write, as a missing group or schedule is.
+    assert "WARNING: skill 'External' does not exist in the target account (used by ST Sample)" in logs
+    assert "NOTE: 1 skill is created in the target account: 'External'" in logs
     saved = next(w for w in portal.writes if w[0] == "save-st")
     assert [s["Name"] for s in saved[2]["Skills"]] == ["chat", "External"]  # the target's spelling
 
@@ -355,7 +358,7 @@ def test_dry_run_only_says_which_skills_would_be_created(tmp_path):
     logs = []
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", dry_run=True, log=logs.append, skills=skills)
     assert skills.created == [] and portal.writes == []
-    assert any("would be created in it: External" in m for m in logs)
+    assert any("NOTE: 1 skill would be created in the target account: 'External'" in m for m in logs)
 
 
 def test_failed_import_deletes_the_skills_it_created(tmp_path):

@@ -245,7 +245,7 @@ def test_source_auxiliary_applet_adds_only_its_keys_missing_in_the_target(tmp_pa
     assert keys == ["AlwaysOpen", "Case Country"]
     assert sum(1 for w in portal.writes if w == ("create", "zz vccflow Aux Data Sources")) == 1
     assert any("'zz vccflow Aux Data Sources' in the source plan is not copied as an applet" in m for m in logs)
-    assert any("already exist in the target account, not added: calltype" in m for m in logs)
+    assert any("1 data source of the source's 'zz vccflow Aux Data Sources' already exists in the target account, not added: calltype" in m for m in logs)
     assert any("'Case Country' is used by LOG B but does not exist" in m for m in logs)
 
 

@@ -278,7 +278,7 @@ def test_import_saves_a_route_whose_plan_exists_and_leaves_the_others_empty_with
                "does not exist in the target account" in m and "failure applet 'DR Decimal' is not set either" in m
                for m in logs)
     assert diffs == []  # the empty route was warned about, not reported again
-    assert any("comparison leaves out the 1 Route to Interaction Plan applets copied without their settings" in m
+    assert any("comparison leaves out the 1 Route to Interaction Plan applet copied without their settings" in m
                and m.endswith(": R gone") for m in logs)
 
 

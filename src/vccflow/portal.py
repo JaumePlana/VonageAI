@@ -642,6 +642,70 @@ def acd_groups(form: _WebForm) -> list[dict]:
     return groups
 
 
+# Dial In Config (dialInConfig.har): a classic ASP page, dialinconfig.asp, with one multipart form per
+# configuration (0-9: next applet, alternative text, announcement) and one form choosing the configuration.
+# Each form posts to updated.asp, which saves that configuration alone ("Your details have been
+# successfully updated"; the choice answers "Your applet number <i> have been selected"). A configuration's current applet is the first option of its list (not marked
+# selected); its announcement is a "Play" link to recordings/...; a save without a file keeps the file.
+DIAL_IN_CONFIG = "DialInConfig"
+DIC_CONFIGS = range(10)
+DIC_PAGE = "dialinconfig.asp"
+DIC_FORM = re.compile(r'<form action="updated\.asp"(.*?)</form>', re.S | re.I)
+DIC_PLAY = re.compile(r'href="\.\./(recordings/[^"]+)"[^>]*>\s*Play\s*</a>', re.I)
+DIC_SAVED = "successfully updated"
+DIC_CHOSEN = "Your applet number {} have been selected"
+DIC_KEYS = re.compile(r"^(AltText|NextApplet)\.([0-9])$")
+
+
+def extract_dial_in_config(html: str) -> dict:
+    """A Dial In Config page: {"configs": {i: {"NextApplet", "AltText", "Audio"}}, "selected": i,
+    "applets": the applets offered}. Audio is the existing file's path ("recordings/..."), or None."""
+    configs, selected, applets = {}, None, set()
+    for body in DIC_FORM.findall(html):
+        form = _web_form("<form" + body + "</form>")
+        if form.fields.get("optype") == "announcementconfig":
+            i = int(form.fields.get("index", "-1"))
+            play = DIC_PLAY.search(body)
+            configs[i] = {"NextApplet": form.fields.get(f"nextapplet{i}", ""), "AltText": form.fields.get("alttext", ""),
+                          "Audio": html_lib.unescape(play.group(1)) if play else None}
+            applets |= {v for v, _ in form.options.get(f"nextapplet{i}", []) if v}
+        elif form.fields.get("optype") == "configNumber":
+            m = re.fullmatch(r"Selected([0-9])", form.fields.get("option", ""))
+            selected = int(m.group(1)) if m else None
+    if sorted(configs) != list(DIC_CONFIGS) or selected is None:
+        raise PortalError("Not a Dial In Config page (configurations 0-9 and the chosen one expected); "
+                          "the page format may have changed")
+    return {"configs": configs, "selected": selected, "applets": applets}
+
+
+def dial_in_config_settings(page: dict) -> tuple[dict, dict]:
+    """(settings, next) of a Dial In Config: the chosen configuration, each configuration's alternative text
+    ("AltText.<i>") and next applet ("NextApplet.<i>"), empty ones left out."""
+    settings: dict = {"SelectedConfiguration": page["selected"]}
+    nxt = {}
+    for i, c in sorted(page["configs"].items()):
+        if c["AltText"]:
+            settings[f"AltText.{i}"] = c["AltText"]
+        if c["NextApplet"]:
+            nxt[f"NextApplet.{i}"] = c["NextApplet"]
+    return settings, nxt
+
+
+def check_dial_in_config(settings: dict, nxt: dict) -> None:
+    """Refuse what the recording does not show."""
+    keys = [k for k in [*settings, *nxt] if k != "SelectedConfiguration" and not DIC_KEYS.match(k)]
+    if keys:
+        raise PortalError(f"Dial In Config settings {', '.join(keys)} have not been recorded yet; they cannot be saved")
+    if settings.get("SelectedConfiguration") not in DIC_CONFIGS:
+        raise PortalError(f"Dial In Config selected configuration {settings.get('SelectedConfiguration')!r} "
+                          "is not 0 to 9")
+
+
+def dial_in_config_empty(settings: dict, nxt: dict, audio: set) -> list[int]:
+    """The configurations with no applet, alternative text or announcement (audio: their numbers)."""
+    return [i for i in DIC_CONFIGS if not (settings.get(f"AltText.{i}") or nxt.get(f"NextApplet.{i}") or i in audio)]
+
+
 def extract_initial_applet(html: str, plan_id: str) -> str | None:
     m = re.search(INITIAL_APPLET.format(plan_id=re.escape(plan_id)), html, re.S)
     if not m:
@@ -1223,6 +1287,63 @@ class PortalClient:
         if ACD_SAVED not in resp.text:
             raise PortalError(f"Saving ACD '{name}' was not confirmed (no \"{ACD_SAVED}\")")
         return extract_acd(resp.text)
+
+    def get_dial_in_config(self, applet: dict) -> dict:
+        """Return extract_dial_in_config() for a Dial In Config from list_applets()."""
+        return extract_dial_in_config(self._request("GET", applet["configUrl"]).text)
+
+    def save_dial_in_config(self, plan_id: str, name: str, settings: dict, nxt: dict,
+                            audio: dict[int, Path] | None = None) -> dict:
+        """Save a Dial In Config as its page does (dialInConfig.har): one multipart post to updated.asp per
+        configuration that has an applet, an alternative text or an announcement, then the chosen
+        configuration. Empty configurations are not posted (a new applet has none). An announcement
+        cannot be removed: a post without a file keeps the existing one. Returns the page read back,
+        after checking every configuration and the chosen one."""
+        self._require_writes()
+        check_dial_in_config(settings, nxt)
+        audio = audio or {}
+        url = f"{DIC_PAGE}?phonenum={quote(plan_id)}&myapp={quote(name)}&application={DIAL_IN_CONFIG}"
+        headers = {"Referer": f"{self.base}/{url}"}
+        page = extract_dial_in_config(self._request("GET", url).text)
+        identity = [("validation", "true"), ("name", "dialinconfig")]
+        where = [("phonenum", plan_id), ("myapp", name), ("application", DIAL_IN_CONFIG)]
+
+        def done(resp: requests.Response, what: str, expected: str = DIC_SAVED) -> None:
+            if expected not in re.sub(r"\s+", " ", resp.text):
+                status = re.search(r'id="statusMessage"[^>]*>(.*?)</td>', resp.text, re.S)
+                message = re.sub(r"<[^>]+>|\s+", " ", status.group(1)).strip() if status else "no message"
+                raise PortalError(f"Saving Dial In Config '{name}' {what} was not confirmed: {message}")
+
+        for i in DIC_CONFIGS:
+            applet, alt, path = nxt.get(f"NextApplet.{i}", ""), settings.get(f"AltText.{i}", ""), audio.get(i)
+            if not (applet or alt or path):
+                continue
+            if applet and applet not in page["applets"]:
+                raise PortalError(f"Dial In Config '{name}': applet '{applet}' (configuration {i}) is not offered")
+            if path and path.stat().st_size > MAX_MEDIA_BYTES:
+                raise PortalError(f"{path} is larger than 10 MB, which the portal refuses")
+            upload = (path.name, path.read_bytes(), "audio/wav") if path else ("", b"", "application/octet-stream")
+            parts = [*identity, ("optype", "announcementconfig"), *where, ("TargetURL", "../uploads/"),
+                     ("index", str(i)), ("announcement", ""), (f"nextapplet{i}", applet), ("alttext", alt)]
+            files = [(k, (None, v)) for k, v in parts] + [("myfile", upload), ("B2", (None, "Update"))]
+            done(self._request("POST", "updated.asp", headers=headers, files=files), f"configuration {i}")
+        selected = settings["SelectedConfiguration"]
+        if selected != page["selected"]:
+            data = [*identity, ("optype", "configNumber"), *where, ("option", f"Selected{selected}"), ("B3", "Update")]
+            done(self._request("POST", "updated.asp", headers=headers, data=data), "selected configuration",
+                 DIC_CHOSEN.format(selected))
+        saved = extract_dial_in_config(self._request("GET", url).text)
+        wrong = [] if saved["selected"] == selected else [f"selected configuration {saved['selected']}"]
+        for i, c in saved["configs"].items():
+            if c["NextApplet"] != nxt.get(f"NextApplet.{i}", ""):
+                wrong.append(f"configuration {i} applet {c['NextApplet']!r}")
+            if c["AltText"] != settings.get(f"AltText.{i}", ""):
+                wrong.append(f"configuration {i} alternative text {c['AltText']!r}")
+            if bool(c["Audio"]) != (i in audio):
+                wrong.append(f"configuration {i} {'with' if c['Audio'] else 'without'} an announcement")
+        if wrong:
+            raise PortalError(f"Dial In Config '{name}' reads back with {', '.join(wrong)}")
+        return saved
 
     def set_initial_applet(self, plan_id: str, name: str) -> None:
         """Set the applet the plan starts with.

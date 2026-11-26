@@ -21,8 +21,8 @@ from vccflow import export
 from vccflow.scoped_api import ApiError
 from vccflow.skills import GroupsClient, SkillsClient
 from vccflow.schedules import SchedulesClient
-from vccflow.portal import (ACD, ACD_PRESENCE, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
-                            acd_groups, acd_presence_states, check_acd, check_shim,
+from vccflow.portal import (ACD, ACD_PRESENCE, DIAL_IN_CONFIG, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
+                            acd_groups, acd_presence_states, check_acd, check_dial_in_config, check_shim,
                             data_connector_form, data_router_form, data_router_missing_targets, shim_configured,
                             skill_tagger_form)
 
@@ -44,6 +44,16 @@ AUX_SDS = "zz vccflow Aux Data Sources"
 EDITOR_TYPES = export.IMPORTABLE_EDITOR_TYPES
 
 
+def count(n: int, one: str, many: str | None = None) -> str:
+    """'1 skill', '3 skills' ('1 Interaction Plan', with many for irregular plurals)."""
+    return f"{n} {one if n == 1 else many or one + 's'}"
+
+
+def are(n: int, dry_run: bool = False) -> str:
+    """The verb for count(): 'is' / 'are', or 'would be' in a dry run."""
+    return "would be" if dry_run else "is" if n == 1 else "are"
+
+
 def load_plan(plan_dir: Path) -> dict:
     path = plan_dir / "plan.json"
     if not path.exists():
@@ -58,7 +68,8 @@ def unsupported_reason(applet: dict) -> str | None:
     """Why this applet cannot be imported yet, or None if it can."""
     if applet.get("unsupported"):
         return f"was not exported: {applet['unsupported']}"
-    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER}:
+    if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER,
+                                               DIAL_IN_CONFIG}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -84,6 +95,15 @@ def unsupported_reason(applet: dict) -> str | None:
             check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
+    if applet["type"] == DIAL_IN_CONFIG:
+        try:
+            check_dial_in_config(applet["settings"], applet.get("next", {}))
+        except PortalError as e:
+            return str(e)
+        slots = [m["property"] for m in applet.get("media", [])]
+        wrong = [s for s in slots if s not in {f"Announcement.{i}" for i in range(10)}]
+        if wrong:
+            return f"Dial In Config audio {', '.join(wrong)} is not a configuration's announcement"
     if applet["type"] == SHIM:
         try:
             check_shim(applet["settings"])
@@ -191,8 +211,8 @@ def check_skills(applets: list[dict], existing: list[str]) -> tuple[dict[str, st
     for name in sorted(users, key=str.lower):
         found = lower.get(name.lower())
         if found is None:
-            missing[name] = (f"skill '{name}' is used by {', '.join(sorted(users[name]))} "
-                             "but does not exist in the target account")
+            missing[name] = (f"skill '{name}' does not exist in the target account "
+                             f"(used by {', '.join(sorted(users[name]))})")
         elif found != name:
             spellings[name] = found
             notes.append(f"skill '{name}' exists in the target account as '{found}': that spelling is used")
@@ -219,6 +239,8 @@ def _resolve_skills(applets: list[dict], existing: list[str], log: Callable[[str
     if missing and not can_create:
         raise PortalError("Cannot import:\n  " + "\n  ".join(missing.values()) + "\n  They cannot be created: "
                           "the User Admin API is not available with users:write for this account")
+    for m in missing.values():
+        log(f"WARNING: {m}")
     use_skill_spellings(applets, spellings)
     return list(missing)
 
@@ -249,7 +271,7 @@ def unsaved_routes(applets: list[dict], plans: list[dict], applets_of: Callable[
         if not found:
             unsaved[a["name"]] = f"Interaction Plan '{s['TargetPlan']}' does not exist in the target account"
         elif len(found) > 1:
-            unsaved[a["name"]] = f"the target account has {len(found)} Interaction Plans named '{s['TargetPlan']}'"
+            unsaved[a["name"]] = f"the target account has {count(len(found), 'Interaction Plan')} named '{s['TargetPlan']}'"
         elif found[0]["interactionPlanId"] == target_plan_id:
             unsaved[a["name"]] = (f"it routes to Interaction Plan '{s['TargetPlan']}', the plan it is copied into, "
                                   "which VCC does not allow")
@@ -343,10 +365,10 @@ def _resolve_acd_lookups(applets: list[dict], target_groups: list[dict], presenc
                           "User Admin API (users:write): " + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})"
                                                                         for g in create))
     if create:
-        log(f"NOTE: {len(create)} groups {'would be' if dry_run else 'are'} created in the target account with "
-            "their source ID and name (maximum unexpected and wrap-up times: VCC Admin's default, 500 seconds; "
-            "agents and presence states are not copied): "
-            + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})" for g in create))
+        log(f"NOTE: {count(len(create), 'group')} {are(len(create), dry_run)} created in the target account: "
+            + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})" for g in create)
+            + f" ({'its' if len(create) == 1 else 'their'} source ID and name; maximum unexpected and wrap-up times: "
+            "VCC Admin's default, 500 seconds; agents and presence states are not copied)")
     return create
 
 
@@ -381,20 +403,24 @@ def plan_schedules(applets: list[dict], source: list[dict], target: list[dict]) 
     by_source = {x["name"]: x for x in source}
     by_target = {x["name"]: x for x in target}
     chosen, warnings, create = {}, [], []
-    statuses_of = {}
+    statuses_of, users = {}, {}
     for a in applets:
         if a.get("type") == SCHEDULE_ROUTER and a["settings"].get("Schedule"):
             name = a["settings"]["Schedule"]
+            users.setdefault(name, set()).add(a["name"])
             own = by_source.get(name, {}).get("targets") or a.get("scheduleStatuses") or                 [k.split(".", 1)[1] for k in a.get("next", {}) if k.startswith("ScheduleMappings.")]
             statuses_of.setdefault(name, set()).update(own)
     for name, wanted in sorted(statuses_of.items()):
+        used = f" (used by {', '.join(sorted(users[name]))})"
+
         def clone(as_name: str, why: str) -> None:
             if name not in by_source:
                 raise PortalError(f"Cannot import: schedule '{name}' {why}, and the export has no definition of it to "
                                   "clone (it was exported without Schedules API access, admin:read)")
             create.append({"name": as_name, "body": by_source[name]})
             chosen[name] = as_name
-            warnings.append(f"schedule '{name}' {why}: it is cloned as '{as_name}' in the target account")
+            warnings.append(f"schedule '{name}' {why}{used}" if as_name == name else
+                            f"schedule '{name}' {why}: it is cloned as '{as_name}'{used}")
 
         there = by_target.get(name)
         if there is None:
@@ -407,14 +433,14 @@ def plan_schedules(applets: list[dict], source: list[dict], target: list[dict]) 
             if extra:
                 warnings.append(f"schedule '{name}' in the target account has more service statuses than in the source: "
                                 f"{', '.join(extra)}. Maybe a routing should be defined for them (they go to the "
-                                "default applet)")
+                                f"default applet){used}")
             continue
         aux = AUX_SCHEDULE_PREFIX + name
         why = f"exists in the target account without the service statuses {', '.join(missing)}"
         old = by_target.get(aux)
         if old is not None and wanted <= set(old.get("targets") or []):
             chosen[name] = aux
-            warnings.append(f"schedule '{name}' {why}: the auxiliary schedule '{aux}' already there is used")
+            warnings.append(f"schedule '{name}' {why}: the auxiliary schedule '{aux}' already there is used{used}")
         elif old is not None:
             raise PortalError(f"Cannot import: schedule '{name}' {why}, and the auxiliary schedule '{aux}' already in "
                               "the target account lacks them too")
@@ -502,8 +528,8 @@ def import_plan(
     aux_keys = [d["Key"] for d in (source_aux or {}).get("settings", {}).get("DataSources") or [] if d.get("Key")]
     if source_aux:
         doc = {**doc, "applets": [a for a in doc["applets"] if a["name"] != AUX_SDS]}
-        log(f"NOTE: '{AUX_SDS}' in the source plan is not copied as an applet; its {len(aux_keys)} data sources "
-            "are checked against the target account")
+        log(f"NOTE: '{AUX_SDS}' in the source plan is not copied as an applet; its {count(len(aux_keys), 'data source')} "
+            f"{are(len(aux_keys))} checked against the target account")
     if skip_unsupported:
         doc, notes = drop_unsupported(doc)
         for n in notes:
@@ -530,7 +556,8 @@ def import_plan(
             to_create = sorted((n for k, n in wanted.items() if k not in lower), key=str.lower)
             already = [k for k in aux_keys if k.lower() in lower]
             if already:
-                log(f"NOTE: {len(already)} data sources of the source's '{AUX_SDS}' already exist in the target "
+                log(f"NOTE: {count(len(already), 'data source')} of the source's '{AUX_SDS}' already "
+                    f"{'exists' if len(already) == 1 else 'exist'} in the target "
                     f"account, not added: {', '.join(already)}")
     aux_in_target = any(a["name"] == AUX_SDS for a in listing.get("applets", []))
     if problems:
@@ -559,8 +586,8 @@ def import_plan(
         else:
             skills_to_create = _resolve_skills(applets, existing_skills, log, skills is not None)
         if skills_to_create:
-            log(f"NOTE: {len(skills_to_create)} skills the target account lacks {'would be' if dry_run else 'are'} "
-                f"created in it: {', '.join(skills_to_create)}")
+            log(f"NOTE: {count(len(skills_to_create), 'skill')} {are(len(skills_to_create), dry_run)} created in "
+                f"the target account: {', '.join(repr(s) for s in skills_to_create)}")
     # ACD groups and presence states: by name in the target account. The groups come from the User Admin
     # API (users:read), else from an ACD page; presence states from an ACD page. Without an ACD in the target
     # account, both are read from the first ACD this import creates, before saving any.
@@ -606,12 +633,13 @@ def import_plan(
         for w in warnings:
             log(f"WARNING: {w}")
         if schedules_to_create:
-            log(f"NOTE: {len(schedules_to_create)} schedules {'would be' if dry_run else 'are'} created in the target "
+            log(f"NOTE: {count(len(schedules_to_create), 'schedule')} {are(len(schedules_to_create), dry_run)} "
+                "created in the target "
                 f"account: {', '.join(repr(c['name']) for c in schedules_to_create)}")
     for name in sorted(empty_schedule_routers):
         log(f"WARNING: Schedule Router '{name}' has no schedule or default applet: it {'would be' if dry_run else 'is'} "
             "created empty and not saved (VCC needs both to save it)")
-    log(f"Checks passed: {len(applets)} applets from '{doc['plan']['name']}' into '{target_plan_name}'")
+    log(f"Checks passed: {count(len(applets), 'applet')} from '{doc['plan']['name']}' into '{target_plan_name}'")
     missing_targets = {a["name"]: m for a in applets if a["type"] == DATA_ROUTER
                        and (m := data_router_missing_targets(a["settings"], a.get("next", {})))}
     verb = "would be" if dry_run else "is"
@@ -625,6 +653,10 @@ def import_plan(
     for name, m in missing_targets.items():
         log(f"WARNING: Data Router '{name}' {verb} copied with no destination applet for: {', '.join(m)}. "
             "Set them in the portal.")
+    for a in applets:
+        if (selected := export.dial_in_config_empty_selection(a)) is not None:
+            log(f"WARNING: Dial In Config '{a['name']}' selects configuration {selected}, which is empty "
+                "(no applet, alternative text or announcement)")
     routes = [a for a in applets if a["type"] == SHIM]
     unsaved = {}
     if routes:
@@ -640,7 +672,7 @@ def import_plan(
                 + ". Set them in the portal.")
     if to_create:
         where = "added to the existing" if aux_in_target else "set in a new"
-        log(f"NOTE: the {len(to_create)} missing data sources {'would be' if dry_run else 'are'} {where} auxiliary "
+        log(f"NOTE: the {count(len(to_create), 'missing data source')} {are(len(to_create), dry_run)} {where} auxiliary "
             f"Set Data Source '{AUX_SDS}', which stays in the plan (VCC keeps a data source only while an applet sets "
             f"it; nothing leads to this applet): {', '.join(to_create)}")
     if dry_run:
@@ -703,7 +735,7 @@ def import_plan(
                 portal.save_acd(target_plan_id, a["name"], a["settings"], nxt,
                                 {m["property"]: plan_dir / m["file"] for m in a.get("media", [])})
                 if a.get("media"):
-                    log(f"   uploaded {len(a['media'])} audio files: {', '.join(m['property'] for m in a['media'])}")
+                    log(f"   uploaded {count(len(a['media']), 'audio file')}: {', '.join(m['property'] for m in a['media'])}")
             elif a["type"] == SCHEDULE_ROUTER and a["name"] in empty_schedule_routers:
                 log(f"   {a['name']}: Schedule Router created empty and not saved (see the warning above)")
                 continue
@@ -721,6 +753,13 @@ def import_plan(
                                              for k, t in nxt.items() if k.startswith("ScheduleMappings.")}
                 portal.save_applet(target_plan_id, a["name"], props)
                 a["settings"]["Schedule"] = schedule  # the read-back shows the target's schedule
+            elif a["type"] == DIAL_IN_CONFIG:
+                audio = {int(m["property"].split(".")[1]): plan_dir / m["file"] for m in a.get("media", [])}
+                portal.save_dial_in_config(target_plan_id, a["name"], a["settings"], nxt, audio)
+                if audio:
+                    n = len(audio)
+                    log(f"   uploaded {count(n, 'announcement')}: configuration{'' if n == 1 else 's'} "
+                        f"{', '.join(map(str, sorted(audio)))}")
             elif a["type"] == SHIM and a["name"] in unsaved:
                 log(f"   {a['name']}: Route to Interaction Plan created without its settings (see the warning above)")
                 continue
@@ -764,7 +803,7 @@ def import_plan(
             log(f"3. Setting the initial applet to '{initial}'")
             portal.set_initial_applet(target_plan_id, initial)
     except Exception:
-        log(f"Import failed; deleting the {len(created)} applets it created")
+        log(f"Import failed; deleting the {count(len(created), 'applet')} it created")
         for name in reversed(created):
             try:
                 portal.delete_applet(target_plan_id, name)
@@ -800,7 +839,7 @@ def import_plan(
     # Routes left without their settings were warned about above; their difference is expected.
     diffs = [d for d in diffs if not any(d.startswith(f"'{n}' ") for n in unsaved)]
     if unsaved:
-        log(f"NOTE: the comparison leaves out the {len(unsaved)} Route to Interaction Plan applets copied without "
+        log(f"NOTE: the comparison leaves out the {count(len(unsaved), 'Route to Interaction Plan applet')} copied without "
             f"their settings (see the warnings above): {', '.join(sorted(unsaved))}")
     for n in notes:
         log(f"NOTE: {n}")

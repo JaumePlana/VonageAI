@@ -193,7 +193,7 @@ def test_report_groups_plan_level_first_then_one_block_per_applet():
     by_name(b, "ANN A")["next"]["NextAppletSuccess"] = "DC C"
     by_name(b, "ST B")["form"]["Skills"] = [{"Name": "DE", "Necessity": 2}]
     lines = format_report(compare_docs(a, b)).splitlines()
-    assert lines[0] == ("SUMMARY: 5 differences (1 plan-level, 1 applets in one plan only, 3 in 2 applets), "
+    assert lines[0] == ("SUMMARY: 5 differences (1 plan-level, 1 applet in one plan only, 3 in 2 applets), "
                         "0 problems, 2 notes")
     body = lines[lines.index("DIFFERENCES (5)") + 1:lines.index("PROBLEMS (0)")]
     assert body[0] == "  Plan" and body[1].startswith("    reporting group: source Sales")

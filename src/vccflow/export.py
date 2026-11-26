@@ -22,8 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from vccflow.portal import (ACD, ACD_DATA_SOURCES, SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS, PortalClient, PortalError,
-                            acd_settings)
+from vccflow.portal import (ACD, ACD_DATA_SOURCES, DIAL_IN_CONFIG, DIC_PAGE, SHIM, SHIM_IVR_BOXES, SKILL_TIME_KEYS,
+                            PortalClient, PortalError, acd_settings, dial_in_config_empty,
+                            dial_in_config_settings)
 
 FORMAT = "vccflow.plan/1"
 SCHEDULE_ROUTER = "ScheduleRouter"
@@ -312,6 +313,16 @@ def data_sources_created(applet: dict) -> set[str]:
     return found
 
 
+def dial_in_config_empty_selection(applet: dict) -> int | None:
+    """The configuration a Dial In Config selects, if that configuration is empty (no applet, alternative
+    text or announcement): VCC accepts it (user, 2026-11-26), the copy and the comparison warn."""
+    if applet.get("type") != DIAL_IN_CONFIG:
+        return None
+    selected = applet.get("settings", {}).get("SelectedConfiguration")
+    audio = {int(m["property"].split(".")[1]) for m in applet.get("media", [])}
+    return selected if selected in dial_in_config_empty(applet["settings"], applet.get("next", {}), audio) else None
+
+
 def data_sources_used(applet: dict) -> set[str]:
     """Data sources the applet reads: $(...) placeholders, an Announcer's data source,
     a Data Router rule's data source, a Salesforce match data source, the values a
@@ -422,6 +433,24 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
             (media_dir / filename).write_bytes(content)
             # VCC stores the file under a GUID: the uploaded file's name is not kept, so it is compared by content.
             media.append({"property": slot, "file": f"media/{filename}", "name": None,
+                          "sha256": hashlib.sha256(content).hexdigest()})
+        if media:
+            entry["media"] = media
+        return entry
+
+    if config_url.lower().startswith(DIC_PAGE):
+        page = portal.get_dial_in_config(applet)
+        entry["type"] = DIAL_IN_CONFIG
+        entry["settings"], entry["next"] = dial_in_config_settings(page)
+        media = []
+        for i, c in sorted(page["configs"].items()):
+            if not c["Audio"]:
+                continue
+            content = portal.download_recording(c["Audio"])
+            filename = f"{_safe_filename(applet['name'] + ' announcement ' + str(i))}{Path(c['Audio']).suffix or '.wav'}"
+            (media_dir / filename).write_bytes(content)
+            # Stored under a GUID, as for an ACD: the uploaded file's name is not kept; compared by content.
+            media.append({"property": f"Announcement.{i}", "file": f"media/{filename}", "name": None,
                           "sha256": hashlib.sha256(content).hexdigest()})
         if media:
             entry["media"] = media

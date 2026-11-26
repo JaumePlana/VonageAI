@@ -256,7 +256,9 @@ def compare_docs(source: dict, target: dict) -> dict:
                 diffs.append(_about(name, kind, f"audio name: source '{am[prop].get('name')}' | "
                                                 f"target '{bm[prop].get('name')}'"))
             elif am[prop].get("sha256") and bm[prop].get("sha256") and am[prop]["sha256"] != bm[prop]["sha256"]:
-                diffs.append(_about(name, kind, f"audio '{am[prop].get('name')}' has different content"))
+                # Files VCC keeps under a GUID (ACD, Dial In Config) have no name: the slot says which one.
+                what = f"'{am[prop]['name']}'" if am[prop].get("name") else prop
+                diffs.append(_about(name, kind, f"audio {what} has different content"))
 
     for key, label in (("initialApplet", "initial applet"), ("reportingGroupName", "reporting group")):
         x, y = source["plan"].get(key), target["plan"].get(key)
@@ -275,6 +277,10 @@ def compare_docs(source: dict, target: dict) -> dict:
                                                       f"{side}: {detail}"))
             report["problems"] += [Finding(f"{side}: {p}", a["name"], a.get("kind"))
                                    for p in a.get("connectionProblems", [])]
+            if (selected := export.dial_in_config_empty_selection(a)) is not None:
+                detail = f"selects configuration {selected}, which is empty (no applet, alternative text or announcement)"
+                report["problems"].append(Finding(f"{side}: '{a['name']}' {detail}", a["name"], a.get("kind"),
+                                                  f"{side}: {detail}"))
     return report
 
 
@@ -323,7 +329,7 @@ def _section(items: list[str], lines: list[str]) -> None:
         by_kind: dict[str, list[str]] = {}
         for x in found:
             by_kind.setdefault(x.kind or "?", []).append(f"'{x.applet}'")
-        lines.append(f"  Compared through their editor page fields only ({len(found)} applets)")
+        lines.append(f"  Compared through their editor page fields only ({importer.count(len(found), 'applet')})")
         lines += [f"    {kind}: {', '.join(names)}" for kind, names in sorted(by_kind.items())]
     for name in sorted(groups, key=str.lower):
         found = groups[name]
@@ -338,9 +344,10 @@ def format_report(report: dict) -> str:
     places = [_place(x) for x in diffs]
     plan, one_side = places.count(PLAN), places.count(ONE_SIDE)
     applets = len(set(places) - {PLAN, ONE_SIDE})
-    lines = [f"SUMMARY: {len(diffs)} differences ({plan} plan-level, {one_side} applets in one plan only, "
-             f"{len(diffs) - plan - one_side} in {applets} applets), "
-             f"{len(report['problems'])} problems, {len(report['notes'])} notes", ""]
+    n = importer.count
+    lines = [f"SUMMARY: {n(len(diffs), 'difference')} ({plan} plan-level, {n(one_side, 'applet')} in one plan only, "
+             f"{len(diffs) - plan - one_side} in {n(applets, 'applet')}), "
+             f"{n(len(report['problems']), 'problem')}, {n(len(report['notes']), 'note')}", ""]
     for key, title in (("differences", "DIFFERENCES"), ("problems", "PROBLEMS"), ("notes", "NOTES")):
         lines.append(f"{title} ({len(report[key])})")
         _section(report[key], lines)

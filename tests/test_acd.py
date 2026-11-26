@@ -384,7 +384,7 @@ def test_dry_run_reports_groups_to_create(tmp_path):
     portal, groups, logs = FakePortal(LOOKUPS), FakeGroups(TARGET_GROUPS), []
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", dry_run=True, log=logs.append, groups=groups)
     assert portal.writes == [] and groups.created == []
-    assert any("1 groups would be created" in m and "'Roumanie' (13102022006)" in m for m in logs)
+    assert any("1 group would be created" in m and "'Roumanie' (13102022006)" in m for m in logs)
 
 
 # --- comparing ---

@@ -105,10 +105,10 @@ def router(name="Schedule Router"):
      "Maybe a routing should be defined for them (they go to the default applet)", None),
     ([{"name": "Fab'n'Fit schedule", "targets": ["Open", "Closed"]}], "zz vccflow Aux Fab'n'Fit schedule",
      "schedule 'Fab'n'Fit schedule' exists in the target account without the service statuses Test, Test 2: it is cloned "
-     "as 'zz vccflow Aux Fab'n'Fit schedule' in the target account", "zz vccflow Aux Fab'n'Fit schedule"),
+     "as 'zz vccflow Aux Fab'n'Fit schedule' (used by Schedule Router, Second)", "zz vccflow Aux Fab'n'Fit schedule"),
     ([{"name": "fab'n'fit schedule", "targets": ["Open"]}], "Fab'n'Fit schedule",
-     "schedule 'Fab'n'Fit schedule' does not exist in the target account: it is cloned as 'Fab'n'Fit schedule' in the "
-     "target account", "Fab'n'Fit schedule"),
+     "schedule 'Fab'n'Fit schedule' does not exist in the target account (used by Schedule Router, Second)",
+     "Fab'n'Fit schedule"),
     ([{"name": "Fab'n'Fit schedule", "targets": ["Open"]},
       {"name": "zz vccflow Aux Fab'n'Fit schedule", "targets": ["Closed", "Open", "Test", "Test 2"]}],
      "zz vccflow Aux Fab'n'Fit schedule", "the auxiliary schedule 'zz vccflow Aux Fab'n'Fit schedule' already there is used", None),
@@ -255,7 +255,7 @@ def test_dry_run_reports_the_clone_without_writing(tmp_path):
     portal, schedules, logs = FakePortal(), FakeSchedules([{"name": "Fab'n'Fit schedule", "targets": ["Open"]}]), []
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", dry_run=True, log=logs.append, schedules=schedules)
     assert portal.writes == [] and schedules.created == []
-    assert any("1 schedules would be created in the target account: \"zz vccflow Aux Fab'n'Fit schedule\"" in m for m in logs)
+    assert any("1 schedule would be created in the target account: \"zz vccflow Aux Fab'n'Fit schedule\"" in m for m in logs)
 
 
 # --- comparing ---
