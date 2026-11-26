@@ -537,6 +537,30 @@ def _used_schedules(schedules: Any, applets: list[dict], log: Callable[[str], No
     return sorted(found, key=lambda x: x["name"])
 
 
+GROUP_FIELDS = ("groupDisplayId", "groupName", "groupMaxUnexpectedTime", "groupMaxWrapUpTime")
+
+
+def _used_groups(groups: Any, applets: list[dict], log: Callable[[str], None]) -> list[dict]:
+    """The definitions of the groups the plan's ACDs use (groups: a GroupsClient for the account, User Admin
+    API, users:read), with their maximum unexpected and wrap-up times, so a copy creates a missing group
+    as it is in the source (userAdminAPI_GroupsMax.har). None without the API."""
+    used = {(g.get("DisplayId"), g.get("Name")) for a in applets if a.get("type") == ACD
+            for g in a["settings"].get("Groups") or []}
+    if not used or groups is None:
+        return []
+    from vccflow.scoped_api import ApiError
+    try:
+        listed = groups.list()
+    except ApiError as e:
+        log(f"    WARNING: group definitions not exported ({e}): a copy creates a missing group with VCC Admin's "
+            "default maximum times")
+        return []
+    found = [{k: g.get(k) for k in GROUP_FIELDS} for g in listed if (g.get("groupDisplayId"), g.get("groupName")) in used]
+    for display_id, name in sorted(used - {(g["groupDisplayId"], g["groupName"]) for g in found}):
+        log(f"    WARNING: group '{name}' ({display_id}) used by an ACD is not in the account's group list")
+    return sorted(found, key=lambda g: g["groupDisplayId"])
+
+
 def export_plan(
     portal: PortalClient,
     plan_id: str,
@@ -545,11 +569,13 @@ def export_plan(
     metadata: dict | None = None,
     log: Callable[[str], None] = print,
     schedules: Any = None,
+    groups: Any = None,
 ) -> dict:
     """Export a plan to out_dir/plan.json (+ media/). Return the plan document.
 
     schedules (a SchedulesClient for the account): also save the definitions of the schedules the
-    plan's Schedule Routers use, in requires.schedules, for a copy to clone where they are missing."""
+    plan's Schedule Routers use, in requires.schedules, for a copy to clone where they are missing.
+    groups (a GroupsClient): likewise the groups the ACDs use, in requires.groups."""
     media_dir = out_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
     listing = portal.list_applets(plan_id)
@@ -579,6 +605,7 @@ def export_plan(
     if initial is None:
         log("    WARNING: the plan has no initial applet")
     used_schedules = _used_schedules(schedules, applets, log)
+    used_groups = _used_groups(groups, applets, log)
     data_sources = sorted(set().union(*(collect_data_sources(a) for a in applets)) if applets else set())
     doc = {
         "format": FORMAT,
@@ -594,7 +621,8 @@ def export_plan(
             **({k: metadata.get(k) for k in PLAN_SETTINGS if k in metadata} if metadata else {}),
         },
         "requires": {"dataSources": data_sources, "dataSourcesNeeded": sorted(data_sources_needed(applets)),
-                     **({"schedules": used_schedules} if used_schedules else {})},
+                     **({"schedules": used_schedules} if used_schedules else {}),
+                     **({"groups": used_groups} if used_groups else {})},
         "applets": applets,
     }
     (out_dir / "plan.json").write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")

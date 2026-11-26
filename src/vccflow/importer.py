@@ -19,7 +19,7 @@ from typing import Callable
 
 from vccflow import export
 from vccflow.scoped_api import ApiError
-from vccflow.skills import GroupsClient, SkillsClient
+from vccflow.skills import GROUP_DEFAULT_MAX_TIME, GroupsClient, SkillsClient
 from vccflow.schedules import SchedulesClient
 from vccflow.portal import (ACD, ACD_PRESENCE, DIAL_IN_CONFIG, MAX_MEDIA_BYTES, SHIM, SHIM_TO_PLAN, PortalClient, PortalError,
                             acd_groups, acd_presence_states, check_acd, check_dial_in_config, check_shim,
@@ -351,10 +351,30 @@ def match_presence_states(applets: list[dict], target: set[str] | dict) -> list[
     return warnings
 
 
+def group_times(create: list[dict], source: list[dict]) -> list[str]:
+    """Give each group to create the source's maximum unexpected and wrap-up times (source: the export's
+    requires.groups, userAdminAPI_GroupsMax.har); return the groups without a definition there, which keep
+    VCC Admin's default."""
+    by_key = {(g["groupDisplayId"], g["groupName"]): g for g in source}
+    unknown = []
+    for g in create:
+        src = by_key.get((g["groupDisplayId"], g["groupName"]))
+        if src is None:
+            unknown.append(f"'{g['groupName']}' ({g['groupDisplayId']})")
+        for key in ("groupMaxUnexpectedTime", "groupMaxWrapUpTime"):
+            g[key] = src[key] if src and src.get(key) is not None else GROUP_DEFAULT_MAX_TIME
+    return unknown
+
+
+def _times(g: dict) -> str:
+    return f"maximum unexpected time {g['groupMaxUnexpectedTime']} s, wrap-up time {g['groupMaxWrapUpTime']} s"
+
+
 def _resolve_acd_lookups(applets: list[dict], target_groups: list[dict], presence: dict, log: Callable[[str], None],
-                        dry_run: bool, can_create: bool) -> list[dict]:
-    """Match the ACDs' groups and presence states (warnings logged); return the groups to create.
-    Without the User Admin API (can_create False), a group to create stops the import."""
+                        dry_run: bool, can_create: bool, source_groups: list[dict]) -> list[dict]:
+    """Match the ACDs' groups and presence states (warnings logged); return the groups to create, with
+    the source's maximum times. Without the User Admin API (can_create False), a group to create stops
+    the import."""
     warnings, create = match_groups(applets, target_groups)
     for w in warnings:
         log(f"WARNING: {w}")
@@ -365,10 +385,15 @@ def _resolve_acd_lookups(applets: list[dict], target_groups: list[dict], presenc
                           "User Admin API (users:write): " + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})"
                                                                         for g in create))
     if create:
+        unknown = group_times(create, source_groups)
+        if unknown:
+            log(f"WARNING: the export has no definition of {count(len(unknown), 'group')} ({', '.join(unknown)}; "
+                f"exported without the User Admin API, users:read): {'it is' if len(unknown) == 1 else 'they are'} "
+                f"created with VCC Admin's default maximum times, {GROUP_DEFAULT_MAX_TIME} seconds")
         log(f"NOTE: {count(len(create), 'group')} {are(len(create), dry_run)} created in the target account: "
-            + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']})" for g in create)
-            + f" ({'its' if len(create) == 1 else 'their'} source ID and name; maximum unexpected and wrap-up times: "
-            "VCC Admin's default, 500 seconds; agents and presence states are not copied)")
+            + ", ".join(f"'{g['groupName']}' ({g['groupDisplayId']}, {_times(g)})" for g in create)
+            + f" ({'its' if len(create) == 1 else 'their'} source ID, name and maximum times; agents and presence "
+            "states are not copied)")
     return create
 
 
@@ -376,8 +401,9 @@ def _create_groups(groups: GroupsClient, create: list[dict], log: Callable[[str]
     log("0. Creating the missing groups")
     made = []
     for g in create:
-        made.append(groups.create(g["groupDisplayId"], g["groupName"]))
-        log(f"   NEW GROUP created in the target account: '{g['groupName']}' ({g['groupDisplayId']})")
+        made.append(groups.create(g["groupDisplayId"], g["groupName"], g["groupMaxUnexpectedTime"],
+                                  g["groupMaxWrapUpTime"]))
+        log(f"   NEW GROUP created in the target account: '{g['groupName']}' ({g['groupDisplayId']}, {_times(g)})")
     return made
 
 
@@ -611,7 +637,7 @@ def import_plan(
                 "checked after creating the applets, before saving any")
         else:
             groups_to_create = _resolve_acd_lookups(applets, target_groups, lookups["presence"], log, dry_run,
-                                                    groups is not None)
+                                                    groups is not None, doc.get("requires", {}).get("groups") or [])
     # Schedule Routers: the schedule by name in the target account (Schedules API, admin:read), cloned
     # where the target lacks it or its service statuses.
     routers = [a for a in applets if a["type"] == SCHEDULE_ROUTER]
@@ -720,7 +746,8 @@ def import_plan(
         if acd_unchecked:
             form = portal.get_acd(by_name[acds[0]["name"]])["form"]
             target_groups = target_groups if target_groups is not None else acd_groups(form)
-            late = _resolve_acd_lookups(applets, target_groups, acd_presence_states(form), log, False, groups is not None)
+            late = _resolve_acd_lookups(applets, target_groups, acd_presence_states(form), log, False, groups is not None,
+                                        doc.get("requires", {}).get("groups") or [])
             if late:
                 created_groups += _create_groups(groups, late, log)
 

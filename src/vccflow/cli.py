@@ -262,7 +262,7 @@ def _export(portal: PortalClient, api: ManagerClient | None, plan: str, out: str
     folder = Path(out or f"exports/{account}/plans/{export._safe_filename(plan_name)}")
     print(f"Exporting '{plan_name}' from '{account}' to {folder}")
     doc = export.export_plan(portal, plan_id, plan_name, folder, metadata=metadata,
-                             schedules=SchedulesClient(portal.account))
+                             schedules=SchedulesClient(portal.account), groups=GroupsClient(portal.account))
     n_media = sum(len(a.get("media", [])) for a in doc["applets"])
     print(f"Saved {folder / 'plan.json'}: {len(doc['applets'])} applets, {n_media} media files")
     if doc["requires"]["dataSources"]:

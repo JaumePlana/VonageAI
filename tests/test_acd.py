@@ -8,6 +8,7 @@ import pytest
 
 from vccflow.compare import compare_docs
 from vccflow.config import Account
+from vccflow import export
 from vccflow.export import data_sources_used, export_applet
 from vccflow.importer import import_plan, match_groups, match_presence_states, unsupported_reason
 from vccflow.portal import PortalClient, PortalError, acd_form, acd_settings, check_acd, extract_acd
@@ -311,8 +312,9 @@ class FakeGroups:
     def list(self):
         return self.groups
 
-    def create(self, display_id, name):
-        g = {"groupId": f"id-{display_id}", "groupDisplayId": display_id, "groupName": name}
+    def create(self, display_id, name, max_unexpected=500, max_wrap_up=500):
+        g = {"groupId": f"id-{display_id}", "groupDisplayId": display_id, "groupName": name,
+             "groupMaxUnexpectedTime": max_unexpected, "groupMaxWrapUpTime": max_wrap_up}
         self.created.append(g)
         return g
 
@@ -320,7 +322,7 @@ class FakeGroups:
         self.deleted.append(group_id)
 
 
-def write_doc(tmp_path, acd, media=True):
+def write_doc(tmp_path, acd, media=True, groups=None):
     others = [{"name": n, "type": "SetDataSource", "settings": {"DataSources": []}, "next": {}}
               for n in ("DC JavaScript", "DR Empty", "MNU Example", "DC Get Salesforce")]
     if media:
@@ -328,6 +330,8 @@ def write_doc(tmp_path, acd, media=True):
         (tmp_path / "media" / "My Queue MusicFile.wav").write_bytes(b"RIFF")
         acd["media"] = [{"property": "MusicFile", "file": "media/My Queue MusicFile.wav", "name": None, "sha256": "x"}]
     doc = {"format": "vccflow.plan/1", "plan": {"name": "Source", "initialApplet": "My Queue"}, "applets": [acd, *others]}
+    if groups is not None:
+        doc["requires"] = {"groups": groups}
     (tmp_path / "plan.json").write_text(json.dumps(doc), encoding="utf-8")
 
 
@@ -341,7 +345,7 @@ def test_import_creates_missing_groups_and_saves_with_the_target_groups_and_audi
                                                                                   "applets": []})
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", log=logs.append, groups=groups)
     assert [g["groupName"] for g in groups.created] == ["Roumanie"]
-    assert any("NEW GROUP created in the target account: 'Roumanie' (13102022006)" in m for m in logs)
+    assert any("NEW GROUP created in the target account: 'Roumanie' (13102022006, " in m for m in logs)
     assert any("matched by name" in m for m in logs)
     saved = next(w for w in portal.writes if w[0] == "save-acd")
     assert [g["DisplayId"] for g in saved[2]["Groups"]] == ["5001", "13102022006"] and saved[4] == ["MusicFile"]
@@ -384,7 +388,43 @@ def test_dry_run_reports_groups_to_create(tmp_path):
     portal, groups, logs = FakePortal(LOOKUPS), FakeGroups(TARGET_GROUPS), []
     import_plan(portal, tmp_path, PLAN_ID, "Scratch", dry_run=True, log=logs.append, groups=groups)
     assert portal.writes == [] and groups.created == []
-    assert any("1 group would be created" in m and "'Roumanie' (13102022006)" in m for m in logs)
+    assert any("1 group would be created" in m and "'Roumanie' (13102022006" in m for m in logs)
+
+
+# The source's definition, as the User Admin API lists it (userAdminAPI_GroupsMax.har #4, #8).
+ROUMANIE = {"groupDisplayId": "13102022006", "groupName": "Roumanie", "groupMaxUnexpectedTime": 60,
+            "groupMaxWrapUpTime": 23}
+
+
+def test_export_keeps_the_definitions_of_the_groups_the_acds_use():
+    listed = [{**ROUMANIE, "groupId": "g-1"}, {"groupId": "g-2", "groupDisplayId": "1", "groupName": "Other",
+                                               "groupMaxUnexpectedTime": 5, "groupMaxWrapUpTime": 5}]
+    applets = [acd_with(("Roumanie", "13102022006"), ("Gone", "777"))]
+    logs = []
+    assert export._used_groups(FakeGroups(listed), applets, logs.append) == [ROUMANIE]
+    assert logs == ["    WARNING: group 'Gone' (777) used by an ACD is not in the account's group list"]
+    assert export._used_groups(None, applets, logs.append) == []
+
+
+def test_a_missing_group_is_created_with_the_source_maximum_times(tmp_path, monkeypatch):
+    write_doc(tmp_path, acd_with(("Roumanie", "13102022006")), groups=[ROUMANIE])
+    portal, groups, logs = FakePortal(LOOKUPS), FakeGroups(TARGET_GROUPS), []
+    monkeypatch.setattr("vccflow.importer.export.export_plan", lambda *a, **k: {"plan": {"initialApplet": "My Queue"},
+                                                                                  "applets": []})
+    import_plan(portal, tmp_path, PLAN_ID, "Scratch", log=logs.append, groups=groups)
+    assert [(g["groupMaxUnexpectedTime"], g["groupMaxWrapUpTime"]) for g in groups.created] == [(60, 23)]
+    assert ("   NEW GROUP created in the target account: 'Roumanie' (13102022006, maximum unexpected time 60 s, "
+            "wrap-up time 23 s)") in logs
+    assert not any("no definition" in m for m in logs)
+
+
+def test_without_the_source_definition_a_group_gets_vcc_admins_default(tmp_path):
+    write_doc(tmp_path, acd_with(("Roumanie", "13102022006")))
+    portal, groups, logs = FakePortal(LOOKUPS), FakeGroups(TARGET_GROUPS), []
+    import_plan(portal, tmp_path, PLAN_ID, "Scratch", dry_run=True, log=logs.append, groups=groups)
+    assert ("WARNING: the export has no definition of 1 group ('Roumanie' (13102022006); exported without the "
+            "User Admin API, users:read): it is created with VCC Admin's default maximum times, 500 seconds") in logs
+    assert any("'Roumanie' (13102022006, maximum unexpected time 500 s, wrap-up time 500 s)" in m for m in logs)
 
 
 # --- comparing ---
