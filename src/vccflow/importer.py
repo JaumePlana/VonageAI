@@ -70,7 +70,8 @@ def unsupported_reason(applet: dict) -> str | None:
         return f"was not exported: {applet['unsupported']}"
     if applet["type"] not in EDITOR_TYPES | {DATA_CONNECTOR, DATA_ROUTER, SKILL_TAGGER, SHIM, ACD, SCHEDULE_ROUTER,
                                                DIAL_IN_CONFIG, COLLECT_INPUT, export.CALL_CONNECT_ROUTER,
-                                               export.CALL_RECORDING, export.LOOP_COUNTER, export.CALLBACK}:
+                                               export.CALL_RECORDING, export.LOOP_COUNTER, export.CALLBACK,
+                                               export.VIRTUAL_ASSISTANT, export.BOT_CONNECTOR}:
         return f"applet type {applet['type']} is not supported for import yet"
     if applet["type"] == DATA_CONNECTOR:
         try:
@@ -96,6 +97,10 @@ def unsupported_reason(applet: dict) -> str | None:
             check_acd(applet["settings"])
         except PortalError as e:
             return str(e)
+    if applet["type"] == export.VIRTUAL_ASSISTANT and (problems := export.virtual_assistant_problems(applet)):
+        return "; ".join(problems)
+    if applet["type"] == export.BOT_CONNECTOR and (problems := export.bot_connector_problems(applet)):
+        return "; ".join(problems)
     if applet["type"] == export.CALLBACK and (problems := export.callback_problems(applet)):
         return "; ".join(problems)
     if applet["type"] in (export.CALL_RECORDING, export.LOOP_COUNTER):
@@ -733,6 +738,10 @@ def import_plan(
         log(f"WARNING: Data Router '{name}' {verb} copied with no destination applet for: {', '.join(m)}. "
             "Set them in the portal.")
     for a in applets:
+        if a["type"] == export.VIRTUAL_ASSISTANT:
+            log(f"WARNING: Virtual Assistant '{a['name']}' {verb} copied with the API key "
+                f"'{export.VA_KEY_PLACEHOLDER}': VCC never returns the key, so it cannot be copied. "
+                "Enter it in the portal.")
         if a.get("connectionProblems"):  # found by the export: references that point nowhere are not copied
             log(f"WARNING: '{a['name']}' has broken references in the source, not copied: "
                 + "; ".join(a["connectionProblems"]))
@@ -763,7 +772,9 @@ def import_plan(
     if dry_run:
         for a in applets:
             log(f"  would create {a['name']} ({a['type']})")
-        log(f"  would set the initial applet to {doc['plan'].get('initialApplet')!r}")
+        initial = doc["plan"].get("initialApplet")
+        log(f"  would set the initial applet to {initial!r}" if initial
+            else "  would leave the initial applet unset (the source plan has none)")
         return []
 
     created: list[str] = []
@@ -875,6 +886,9 @@ def import_plan(
                     log(f"   uploaded {path.name} as '{filename}'")
                 if any(k.startswith("Choices.") for k in nxt):
                     props["Choices"] = {}
+                if a["type"] == export.VIRTUAL_ASSISTANT:
+                    props.pop("VonageAiKeySet", None)
+                    props["VonageAiKey"] = export.VA_KEY_PLACEHOLDER
                 if a["type"] == export.CALLBACK:
                     plan_target = a["settings"].get("CallbackInitialPlan")
                     for k in export.CB_OTHER_PLAN:
@@ -886,6 +900,9 @@ def import_plan(
                     t = by_name[target]
                     if a["type"] == export.CALLBACK and key == export.CB_INITIAL:
                         props["CallbackInitialAppletId"] = t.get("id")
+                        continue
+                    if a["type"] == export.BOT_CONNECTOR and key in export.BOT_APPLETS:
+                        props[key] = t.get("guid")  # a plain GUID, as the editor saves it
                         continue
                     if a["type"] == export.CALLBACK and key in export.CB_GUID_APPLETS:
                         props[f"{key}Guid"] = t.get("guid")

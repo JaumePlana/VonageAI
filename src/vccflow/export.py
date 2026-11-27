@@ -98,6 +98,25 @@ CB_INITIAL = "CallbackInitialApplet"
 CB_OTHER_PLAN = ("CallbackInitialPlan", "CallbackInitialApplet")
 CB_NUMBERS = ("CallbackNumberProperty", "PresentedNumberProperty")
 CB_GUID_APPLETS = ("DuplicateCallbackApplet", "FailureApplet")
+# Virtual Assistant (virtualAssistantAndBot.har): a React editor, appletType "VirtualAssistant". VCC never
+# returns the API key: it answers, and the page loads, a GUID naming where the applet's key is stored (the
+# same GUID after a key change); posting it back keeps the key. So the export keeps only whether a key is
+# set, and a copy saves VA_KEY_PLACEHOLDER with a warning (user, 2026-11-27). ID and Number are required
+# (50 characters); the failure applet is a numeric ID + GUID, as in Menu.
+VIRTUAL_ASSISTANT = "VirtualAssistant"
+VA_KEY_PLACEHOLDER = "SET-IN-PORTAL"
+VA_SETTINGS = {"VonageAiKeySet", "VirtualAgentId", "VonageAiAgentPhoneNumber", "VonageStudioRegion", "InteractionType",
+               "VaiResultParameterName", "DataSourcesToVirtualAssistantParamsMapping",
+               "VirtualAssistantParamsToDataSourcesMapping"}
+# Bot Connector (same HAR): appletType "BotConnector", provider Agentforce. The phone number is required
+# (80 characters); the two data source names are data sources the applet sets; the three routing applets
+# are plain GUIDs in fields not named "...Guid".
+BOT_CONNECTOR = "BotConnector"
+BOT_APPLETS = ("AgentForce_AgentEscalationApplet", "AgentForce_InteractionPlanEscalationApplet",
+               "AgentForce_FailureApplet")
+BOT_DATA_SOURCES = ("AgentForce_InteractionPlanDataSourceName", "AgentForce_AgentIdDataSourceName")
+BOT_SETTINGS = {"InteractionType", "Provider", "AgentForce_PstnNumber", "AgentForce_BotName", "AgentForce_SipSupport",
+                *BOT_DATA_SOURCES, "AgentForce_DigitalFallbackQueue", "BotProperties"}
 GUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 XML_DESTINATION = re.compile(r"<(?:Destination|ResponseCodeDestination)>([^<]+)</")
 SOQL_SELECT = re.compile(r"^\s*SELECT\s+(.+?)\s+FROM\s+(\w+)", re.I | re.S)
@@ -327,6 +346,8 @@ def data_sources_created(applet: dict) -> set[str]:
     """
     s = applet.get("settings", {})
     found = {ds["Key"] for ds in s.get("DataSources") or [] if ds.get("Key")}
+    if applet.get("type") == BOT_CONNECTOR:  # named in the editor; VCC creates them on save
+        found.update(s[k] for k in BOT_DATA_SOURCES if s.get(k))
     if applet.get("type") == COLLECT_INPUT and s.get("CollectToDataSource") and s.get("DataSource"):
         found.add(s["DataSource"])  # the collected digits; VCC creates a new data source by that name
     for text in _strings(s):
@@ -449,6 +470,47 @@ def callback_problems(applet: dict) -> list[str]:
         problems.append(f"Callback connections {', '.join(extra)} have not been recorded yet")
     if nxt.get(CB_INITIAL) == applet.get("name"):
         problems.append("Callback initial applet is the applet itself, which the editor does not allow")
+    return problems
+
+
+def virtual_assistant_problems(applet: dict) -> list[str]:
+    """Why a Virtual Assistant cannot be saved as it is: what the recording does not show or VCC refuses."""
+    s, nxt = applet.get("settings", {}), applet.get("next", {})
+    problems = []
+    unknown = sorted(set(s) - VA_SETTINGS)
+    if unknown:
+        problems.append(f"Virtual Assistant settings {', '.join(unknown)} have not been recorded yet")
+    for key, label in (("VirtualAgentId", "ID"), ("VonageAiAgentPhoneNumber", "Number")):
+        v = s.get(key)
+        if not isinstance(v, str) or not v or len(v) > 50:
+            problems.append(f"Virtual Assistant {label} {v!r} is not 1 to 50 characters, which VCC requires")
+    for key in ("DataSourcesToVirtualAssistantParamsMapping", "VirtualAssistantParamsToDataSourcesMapping"):
+        if s.get(key):
+            problems.append(f"Virtual Assistant {key} has not been recorded yet")
+    if set(nxt) - {"NextApplet", "FailureApplet"}:
+        problems.append(f"Virtual Assistant connections {', '.join(sorted(set(nxt) - {'NextApplet', 'FailureApplet'}))} "
+                        "have not been recorded yet")
+    return problems
+
+
+def bot_connector_problems(applet: dict) -> list[str]:
+    """Why a Bot Connector cannot be saved as it is: what the recording does not show or VCC refuses."""
+    s, nxt = applet.get("settings", {}), applet.get("next", {})
+    problems = []
+    unknown = sorted(set(s) - BOT_SETTINGS)
+    if unknown:
+        problems.append(f"Bot Connector settings {', '.join(unknown)} have not been recorded yet")
+    if s.get("Provider") != "Agentforce":
+        problems.append(f"Bot Connector provider {s.get('Provider')!r} has not been recorded yet (only Agentforce)")
+    v = s.get("AgentForce_PstnNumber")
+    if not isinstance(v, str) or not v or len(v) > 80:
+        problems.append(f"Bot Connector phone number {v!r} is not 1 to 80 characters, which VCC requires")
+    for key in ("AgentForce_DigitalFallbackQueue", "BotProperties"):
+        if s.get(key):
+            problems.append(f"Bot Connector {key} has not been recorded yet")
+    if set(nxt) - {"NextApplet", *BOT_APPLETS}:
+        problems.append(f"Bot Connector connections {', '.join(sorted(set(nxt) - {'NextApplet', *BOT_APPLETS}))} "
+                        "have not been recorded yet")
     return problems
 
 
@@ -620,7 +682,13 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         own = next((x for x in schedules_in_metadata(state.get("metadata")) if x["id"] == props.get("Schedule")), None)
         entry["scheduleStatuses"] = own["targets"] if own else []
     listed = listed or []
-    cb_initial = None
+    cb_initial, bot_applets = None, {}
+    if entry["type"] == VIRTUAL_ASSISTANT:  # the key itself is never returned (see VIRTUAL_ASSISTANT)
+        props = dict(props)
+        props["VonageAiKeySet"] = bool(props.pop("VonageAiKey", None))
+    if entry["type"] == BOT_CONNECTOR:  # GUIDs in fields not named "...Guid": resolved by name below
+        props = dict(props)
+        bot_applets = {k: props.pop(k, None) for k in BOT_APPLETS}
     if entry["type"] == CALLBACK:  # may point to another plan: resolved by name below
         props = dict(props)
         cb_initial = {k: props.pop(k, None) for k in CB_INITIAL_FIELDS}
@@ -643,6 +711,12 @@ def export_applet(portal: PortalClient, plan_id: str, applet: dict, media_dir: P
         if nxt.get("NextApplet") == nxt.get("UnsuccessfulCallApplet"):
             nxt.pop("NextApplet", None)  # VCC's copy of UnsuccessfulCallApplet; another value is kept
         settings = {k: v for k, v in settings.items() if k not in CCR_NOT_COPIED}
+    by_guid = {str(a.get("guid")).lower(): a["name"] for a in listed if a.get("guid")}
+    for k, guid in bot_applets.items():
+        if guid and by_guid.get(str(guid).lower()):
+            nxt[k] = by_guid[str(guid).lower()]
+        elif guid:
+            problems.append(f"'{applet['name']}' {k} {guid} is not in this plan")
     if cb_initial is not None:
         cb_settings, cb_next, cb_problems = callback_initial(portal, plan_id, cb_initial, listed, applet["name"])
         settings.update(cb_settings)
