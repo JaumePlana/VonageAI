@@ -79,6 +79,10 @@ The export drops IDs that belong to one account, keeps connections by applet nam
 
 `har` writes `architect.clean.har` (cookies, auth headers and tokens removed; scripts, styles and images dropped) and an `architect.bodies/` folder with every request/response body, and prints the list of calls, with writes marked `*`. Only share the `.clean.har`, and only after checking it.
 
+## Planned: Interaction Plans from Visio
+
+Each page of a Visio design (`.vsdx`) is to become an Interaction Plan: vccflow reads the file directly (a ZIP of XML; no Visio or MCP needed), turns its shapes and connectors into applets and connections through an editable mapping of the drawing conventions (Viessmann: a shape's colour gives the applet type, its text the applet name), writes a `plan.json` in the export format, and copies it with `import-plan`, warning about every setting the diagram does not hold. Not started yet; see PROGRESS.md.
+
 ## Tests
 
 ```powershell
